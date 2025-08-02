@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IG Publisher Manager</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: #f5f5f5;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Toolbar */
+        .toolbar {
+            background: #fff;
+            border-bottom: 1px solid #ddd;
+            padding: 8px 12px;
+            display: flex;
+            gap: 2px;
+            flex-shrink: 0;
+            align-items: center;
+        }
+
+        .toolbar button {
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            padding: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 36px;
+            height: 36px;
+        }
+
+        .toolbar button:hover:not(:disabled) {
+            background: #f0f0f0;
+            border-color: #999;
+        }
+
+        .toolbar button:active:not(:disabled) {
+            background: #e0e0e0;
+        }
+
+        .toolbar button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .toolbar button img {
+            display: block;
+        }
+
+        .toolbar-separator {
+            width: 2px;
+            height: 40px;
+            background: #ddd;
+            margin: 0 4px;
+            border-radius: 1px;
+        }
+
+        /* Toggle button for options panel */
+        .toggle-button {
+            min-width: 32px !important;
+            height: 32px !important;
+            padding: 8px !important;
+            margin-left: 8px;
+        }
+
+        .toggle-button .arrow-icon {
+            transition: transform 0.2s ease;
+        }
+
+        .toggle-button.expanded .arrow-icon {
+            transform: rotate(180deg);
+        }
+
+        /* Context Menus */
+        .context-menu {
+            position: absolute;
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 1000;
+            min-width: 180px;
+            padding: 4px 0;
+        }
+
+        .context-menu-item {
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 13px;
+            color: #333;
+        }
+
+        .context-menu-item:hover {
+            background: #f0f0f0;
+        }
+
+        /* Dialog Styles */
+        .dialog-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+        }
+
+        .dialog {
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            min-width: 400px;
+            max-width: 600px;
+        }
+
+        .dialog-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid #ddd;
+            font-weight: 600;
+            font-size: 16px;
+            color: #333;
+        }
+
+        .dialog-content {
+            padding: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 500;
+            color: #555;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .form-group button {
+            margin-left: 8px;
+            padding: 8px 12px;
+            background: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .form-group button:hover {
+            background: #e0e0e0;
+        }
+
+        .form-group > div {
+            display: flex;
+            align-items: center;
+        }
+
+        .form-group input {
+            flex: 1;
+        }
+        .dialog-buttons {
+            padding: 16px 20px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+
+        .btn-cancel {
+            padding: 8px 16px;
+            background: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .btn-ok {
+            padding: 8px 16px;
+            background: #007acc;
+            color: #fff;
+            border: 1px solid #007acc;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .btn-ok:hover {
+            background: #005fa3;
+        }
+
+        /* Paste section styling */
+        .paste-section {
+            margin-bottom: 20px;
+            padding: 12px;
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 6px;
+        }
+
+        .btn-paste {
+            background: #28a745;
+            color: #fff;
+            border: 1px solid #28a745;
+            border-radius: 4px;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+
+        .btn-paste:hover {
+            background: #218838;
+            border-color: #1e7e34;
+        }
+
+        .btn-paste:disabled {
+            background: #6c757d;
+            border-color: #6c757d;
+            cursor: not-allowed;
+            opacity: 0.8;
+        }
+
+        .paste-error {
+            color: #dc3545;
+            font-size: 13px;
+            margin-top: 8px;
+            padding: 8px;
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            border-radius: 4px;
+        }
+
+        /* Options Panel */
+        .options-panel {
+            background: #fff;
+            border-bottom: 1px solid #ddd;
+            padding: 0 12px;
+            display: grid;
+            grid-template-columns: 300px 90px 80px 1fr;
+            gap: 20px;
+            align-items: center;
+            flex-shrink: 0;
+            overflow: hidden;
+            transition: all 0.3s ease;
+            max-height: 0;
+            opacity: 0;
+        }
+
+        .options-panel.visible {
+            padding: 12px;
+            max-height: 90px;
+            opacity: 1;
+        }
+
+        .options-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .options-group label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #666;
+            margin-bottom: 4px;
+        }
+
+        .options-group input, .options-group select {
+            padding: 6px 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        /* Specific sizing for dropdown and number input */
+        #ig-publisher-version {
+            width: 85px; /* Enough for 6 characters */
+        }
+
+        #max-memory {
+            width: 65px; /* Enough for 2 digits */
+        }
+
+        .checkboxes {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .checkbox-item input[type="checkbox"] {
+            margin: 0;
+        }
+
+        .checkbox-item label {
+            font-size: 13px;
+            margin: 0;
+            font-weight: normal;
+            color: #333;
+        }
+
+        /* Specific sizing for dropdown and number input */
+        #ig-publisher-version {
+            width: 85px; /* Enough for 6 characters */
+        }
+
+        /* Main Content Area */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            min-height: 0; /* Important for flex children with overflow */
+        }
+
+        /* IG List */
+        .ig-list-container {
+            flex: 1;
+            min-height: 200px;
+            background: #fff;
+            margin: 0 12px 0 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .ig-list-header {
+            background: #f8f9fa;
+            border-bottom: 1px solid #ddd;
+            padding: 8px 12px;
+            font-weight: 600;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .ig-list {
+            flex: 1;
+            overflow: auto;
+        }
+
+        .ig-list table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .ig-list th {
+            background: #f8f9fa;
+            padding: 8px 12px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            color: #666;
+            border-bottom: 1px solid #ddd;
+            position: sticky;
+            top: 0;
+        }
+
+        .ig-list td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #eee;
+            font-size: 13px;
+        }
+
+        .ig-list tr:hover {
+            background: #f8f9fa;
+        }
+
+        .ig-list tr.selected {
+            background: #e3f2fd;
+        }
+
+        .status-badge {
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .status-success {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .status-building {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .status-none {
+            background: #f8f9fa;
+            color: #666;
+        }
+        /* Resizer */
+        .resizer {
+            height: 4px;
+            background: #ddd;
+            cursor: row-resize;
+            margin: 0 12px;
+            position: relative;
+            flex-shrink: 0; /* Don't allow the resizer to shrink */
+            transition: background-color 0.2s ease;
+        }
+
+        .resizer:hover {
+            background: #007acc;
+        }
+
+        /* Build Output */
+        .build-output-container {
+            height: 200px;
+            background: #fff;
+            margin: 0 12px 12px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0; /* Don't allow it to shrink below its set height */
+        }
+
+        .build-output-header {
+            background: #f8f9fa;
+            border-bottom: 1px solid #ddd;
+            padding: 8px 12px;
+            font-weight: 600;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .build-output {
+            flex: 1;
+            padding: 12px;
+            overflow: auto;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.4;
+            background: #fafafa;
+            white-space: pre-wrap;
+            color: #333;
+            user-select: text; /* Enable text selection */
+            cursor: text; /* Show text cursor */
+        }
+
+        .build-output:focus {
+            outline: none; /* Remove focus outline since it's not an input */
+        }
+
+        .folder-info {
+            margin: 12px 0;
+            padding: 8px;
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            word-break: break-all;
+        }
+
+        .warning-text {
+            margin: 12px 0;
+            padding: 8px;
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 4px;
+            color: #856404;
+            font-size: 13px;
+        }
+
+        .btn-delete {
+            padding: 8px 16px;
+            background: #dc3545;
+            color: #fff;
+            border: 1px solid #dc3545;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .btn-delete:hover {
+            background: #c82333;
+            border-color: #bd2130;
+        }
+
+
+        .context-menu-separator {
+            height: 1px;
+            background: #ddd;
+            margin: 4px 0;
+        }
+
+        .context-menu-item {
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 13px;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .context-menu-item:hover:not(.disabled) {
+            background: #f0f0f0;
+        }
+
+        .context-menu-item.disabled {
+            color: #999;
+            cursor: not-allowed;
+        }
+
+        .context-menu-item.disabled:hover {
+            background: transparent;
+        }
+
+        .menu-icon {
+            font-size: 14px;
+            width: 16px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <!-- Toolbar -->
+    <div class="toolbar">
+        <button id="btn-add-folder" title="Add Folder">
+            <img src="assets/icons/add-folder.png" width="32" height="32" alt="">
+        </button>
+        <button id="btn-add-github" title="Add from GitHub">
+            <img src="assets/icons/add-github.png" width="32" height="32" alt="">
+        </button>
+        <button id="btn-delete" title="Delete" disabled>
+            <img src="assets/icons/delete.png" width="32" height="32" alt="">
+        </button>
+        <div class="toolbar-separator"></div>
+        <button id="btn-build" title="Build" disabled>
+            <img src="assets/icons/build.png" width="32" height="32" alt="">
+        </button>
+        <button id="btn-stop" title="Stop" disabled>
+            <img src="assets/icons/stop.png" width="32" height="32" alt="">
+        </button>
+        <div class="toolbar-separator"></div>
+        <button id="btn-open-ig" title="Open IG" disabled>
+            <img src="assets/icons/open.png" width="32" height="32" alt="">
+        </button>
+        <button id="btn-open-qa" title="Open QA" disabled>
+            <img src="assets/icons/qa.png" width="32" height="32" alt="">
+        </button>
+        <button id="btn-copy" title="Copy..." disabled>
+            <img src="assets/icons/copy.png" width="32" height="32" alt="">
+        </button>
+        <div class="toolbar-separator"></div>
+        <button id="btn-update" title="Update Source..." disabled>
+            <img src="assets/icons/update.png" width="32" height="32" alt="">
+        </button>
+        <button id="btn-tools" title="Dev Tools..." disabled>
+            <img src="assets/icons/devtools.png" width="32" height="32" alt="">
+        </button>
+        
+        <!-- Spacer to push toggle to the right -->
+        <div style="flex: 1;"></div>
+        
+        <!-- Options panel toggle -->
+        <button id="btn-toggle-options" title="Show Options" class="toggle-button">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="arrow-icon">
+                <polyline points="6,9 12,15 18,9"/>
+            </svg>
+        </button>
+    </div>
+
+    <!-- Options Panel -->
+    <div class="options-panel" id="options-panel">
+        <div class="options-group">
+            <label for="terminology-server">Terminology Server URL</label>
+            <input type="text" id="terminology-server" placeholder="Leave blank to use the Terminology Ecosystem">
+        </div>
+        
+        <div class="options-group">
+            <label for="ig-publisher-version">IGPublisher Version</label>
+            <select id="ig-publisher-version">
+                <option value="latest">Latest</option>
+                <option value="1.6.0">1.6.0</option>
+                <option value="1.5.0">1.5.0</option>
+                <option value="1.4.0">1.4.0</option>
+            </select>
+        </div>
+
+        <div class="options-group">
+            <label for="max-memory">Max Memory (GB)</label>
+            <input type="number" id="max-memory" value="8" min="1" max="32" step="1">
+        </div>
+
+        <div class="checkboxes">
+            <div class="checkbox-item">
+                <input type="checkbox" id="no-narrative">
+                <label for="no-narrative">No Narrative</label>
+            </div>
+            <div class="checkbox-item">
+                <input type="checkbox" id="no-validation">
+                <label for="no-validation">No Validation</label>
+            </div>
+            <div class="checkbox-item">
+                <input type="checkbox" id="no-network">
+                <label for="no-network">No Network</label>
+            </div>
+            <div class="checkbox-item">
+                <input type="checkbox" id="no-sushi">
+                <label for="no-sushi">No Sushi</label>
+            </div>
+            <div class="checkbox-item">
+                <input type="checkbox" id="debugging">
+                <label for="debugging">Debugging</label>
+            </div>
+        </div>
+    </div>
+
+    <!-- Context Menus -->
+    <div id="copy-menu" class="context-menu" style="display: none;">
+        <!-- Items will be built dynamically -->
+    </div>
+
+    <div id="tools-menu" class="context-menu" style="display: none;">
+        <div class="context-menu-item" data-action="clear-txcache">Clear TxCache</div>
+        <div class="context-menu-item" data-action="open-folder">Open Folder</div>
+        <div class="context-menu-item" data-action="open-terminal">Open Terminal Here</div>
+        <div class="context-menu-item" data-action="run-jekyll">Run Jekyll</div>
+        <div class="context-menu-item" data-action="open-settings">Open Settings File</div>
+    </div>
+
+    <div id="ig-context-menu" class="context-menu" style="display: none;">
+        <div class="context-menu-item" data-action="build">
+            <span class="menu-icon">🔨</span>Start Build
+        </div>
+        <div class="context-menu-item" data-action="stop">
+            <span class="menu-icon">⏹</span>Stop Build
+        </div>
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-item" data-action="open-ig">
+            <span class="menu-icon">🌐</span>Open IG
+        </div>
+        <div class="context-menu-item" data-action="open-qa">
+            <span class="menu-icon">📋</span>Open QA
+        </div>
+        <div class="context-menu-item" data-action="copy-path">
+            <span class="menu-icon">📁</span>Copy Path
+        </div>
+        <div class="context-menu-item" data-action="copy-github">
+            <span class="menu-icon">🔗</span>Copy GitHub URL
+        </div>
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-item" data-action="update">
+            <span class="menu-icon">⬇️</span>Update
+        </div>
+        <div class="context-menu-item" data-action="open-folder">
+            <span class="menu-icon">📂</span>Open Folder
+        </div>
+        <div class="context-menu-item" data-action="open-terminal">
+            <span class="menu-icon">💻</span>Open Terminal
+        </div>
+    </div>
+
+
+    <div id="build-output-context-menu" class="context-menu" style="display: none;">
+        <div class="context-menu-item" data-action="copy-selected">
+            <span class="menu-icon">📋</span>Copy Selected
+        </div>
+        <div class="context-menu-item" data-action="copy-all">
+            <span class="menu-icon">📄</span>Copy All
+        </div>
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-item" data-action="clear-log">
+            <span class="menu-icon">🗑️</span>Clear Log
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- IG List -->
+        <div class="ig-list-container">
+            <div class="ig-list-header">Implementation Guides</div>
+            <div class="ig-list">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Version</th>
+                            <th>Folder</th>
+                            <th>Build Status</th>
+                            <th>Build Time</th>
+                            <th>Built Size</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ig-list-body">
+                        <!-- Sample data -->
+                        <tr class="selected">
+                            <td>US Core Implementation Guide</td>
+                            <td>6.1.0</td>
+                            <td>/Users/dev/fhir/us-core</td>
+                            <td><span class="status-badge status-success">Success</span></td>
+                            <td>2:34</td>
+                            <td>15.2 MB</td>
+                        </tr>
+                        <tr>
+                            <td>SMART App Launch</td>
+                            <td>2.0.0</td>
+                            <td>/Users/dev/fhir/smart-app-launch</td>
+                            <td><span class="status-badge status-error">Error</span></td>
+                            <td>1:12</td>
+                            <td>8.7 MB</td>
+                        </tr>
+                        <tr>
+                            <td>International Patient Summary</td>
+                            <td>1.1.0</td>
+                            <td>/Users/dev/fhir/ips</td>
+                            <td><span class="status-badge status-none">Not Built</span></td>
+                            <td>-</td>
+                            <td>-</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Resizer -->
+        <div class="resizer" id="resizer"></div>
+
+        <!-- Build Output -->
+        <div class="build-output-container">
+            <div class="build-output-header">Build Output - US Core Implementation Guide</div>
+            <div class="build-output" id="build-output">Building IG US Core Implementation Guide...
+
+[INFO] Starting IG Publisher v1.6.0
+[INFO] Loading configuration from ig.ini
+[INFO] Processing FHIR resources...
+[INFO] Validating conformance resources...
+[INFO] Generating narrative content...
+[INFO] Building publication...
+[SUCCESS] Build completed successfully in 2m 34s
+[INFO] Output size: 15.2 MB
+[INFO] QA Report available at: output/qa.html
+
+Build completed at: 2025-08-02 14:23:45</div>
+        </div>
+    </div>
+
+    <script src="renderer.js"></script>
+</body>
+</html>

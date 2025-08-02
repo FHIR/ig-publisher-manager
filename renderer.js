@@ -1,0 +1,2842 @@
+const ipcRenderer = require('electron').ipcRenderer;
+const fs = require('fs');
+const path = require('path');
+
+// Application state
+let igList = [];
+let selectedIgIndex = -1;
+let optionsPanelVisible = false;
+let buildProcesses = new Map();
+let fileWatcher = null;
+
+// DOM elements
+let igListBody;
+let buildOutput;
+let optionsPanel;
+let toggleButton;
+
+// Console management for each IG
+function initializeIgConsole(ig) {
+    if (!ig.console) {
+        ig.console = '';
+    }
+
+// Settings management
+function saveSettings() {
+    try {
+        const settings = {
+            terminologyServer: document.getElementById('terminology-server').value,
+            igPublisherVersion: document.getElementById('ig-publisher-version').value,
+            maxMemory: document.getElementById('max-memory').value,
+            noNarrative: document.getElementById('no-narrative').checked,
+            noValidation: document.getElementById('no-validation').checked,
+            noNetwork: document.getElementById('no-network').checked,
+            noSushi: document.getElementById('no-sushi').checked,
+            debugging: document.getElementById('debugging').checked
+        };
+        
+        localStorage.setItem('igPublisherSettings', JSON.stringify(settings));
+    } catch (error) {
+        console.log('Could not save settings:', error);
+    }
+}
+
+function loadSettings() {
+    try {
+        const settings = JSON.parse(localStorage.getItem('igPublisherSettings') || '{}');
+        
+        if (settings.terminologyServer) {
+            document.getElementById('terminology-server').value = settings.terminologyServer;
+        }
+        if (settings.igPublisherVersion) {
+            document.getElementById('ig-publisher-version').value = settings.igPublisherVersion;
+        }
+        if (settings.maxMemory) {
+            document.getElementById('max-memory').value = settings.maxMemory;
+        } else {
+            document.getElementById('max-memory').value = '8'; // Default to 8GB
+        }
+        
+        document.getElementById('no-narrative').checked = settings.noNarrative || false;
+        document.getElementById('no-validation').checked = settings.noValidation || false;
+        document.getElementById('no-network').checked = settings.noNetwork || false;
+        document.getElementById('no-sushi').checked = settings.noSushi || false;
+        document.getElementById('debugging').checked = settings.debugging || false;
+    } catch (error) {
+        console.log('Could not load settings:', error);
+    }
+}
+
+// IG Publisher JAR management
+async function getJarPath(version) {
+    // Get the user data directory for storing JARs
+    const userDataPath = await ipcRenderer.invoke('get-user-data-path');
+    const jarsDir = path.join(userDataPath, 'jars');
+    
+    // Ensure jars directory exists
+    if (!fs.existsSync(jarsDir)) {
+        fs.mkdirSync(jarsDir, { recursive: true });
+    }
+    
+    const jarFileName = 'validator_cli_' + version + '.jar';
+    return path.join(jarsDir, jarFileName);
+}
+
+async function ensureJarExists(version, downloadUrl, ig) {
+    const jarPath = await getJarPath(version);
+    
+    if (fs.existsSync(jarPath)) {
+        appendToIgConsole(ig, 'Using existing JAR: ' + jarPath);
+        return jarPath;
+    }
+    
+    appendToIgConsole(ig, 'Downloading IG Publisher version ' + version + '...');
+    appendToIgConsole(ig, 'Download URL: ' + downloadUrl);
+    
+    try {
+        const response = await fetch(downloadUrl);
+        if (!response.ok) {
+            throw new Error('Download failed: ' + response.status + ' ' + response.statusText);
+        }
+        
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        fs.writeFileSync(jarPath, buffer);
+        appendToIgConsole(ig, 'Downloaded JAR to: ' + jarPath);
+        appendToIgConsole(ig, 'JAR size: ' + (buffer.length / 1024 / 1024).toFixed(1) + ' MB');
+        
+        return jarPath;
+    } catch (error) {
+        appendToIgConsole(ig, 'Failed to download JAR: ' + error.message);
+        throw error;
+    }
+}
+
+function buildIgPublisherCommand(ig, jarPath) {
+    const settings = getCurrentSettings();
+    
+    const command = ['java'];
+    
+    // Add memory setting
+    command.push('-Xmx' + settings.maxMemory + 'G');
+    
+    // Add JAR
+    command.push('-jar');
+    command.push(jarPath);
+    
+    // Add IG folder
+    command.push('-ig');
+    command.push(ig.folder);
+    
+    // Add optional parameters
+    if (settings.terminologyServer && settings.terminologyServer.trim()) {
+        command.push('-tx');
+        command.push(settings.terminologyServer.trim());
+    }
+    
+    if (settings.noNarrative) {
+        command.push('-no-narrative');
+    }
+    
+    if (settings.noValidation) {
+        command.push('-no-validation');
+    }
+    
+    if (settings.noNetwork) {
+        command.push('-no-network');
+    }
+    
+    if (settings.noSushi) {
+        command.push('-no-sushi');
+    }
+    
+    if (settings.debugging) {
+        command.push('-debug');
+    }
+    
+    return command;
+}
+
+function getCurrentSettings() {
+    return {
+        terminologyServer: document.getElementById('terminology-server').value,
+        igPublisherVersion: document.getElementById('ig-publisher-version').value,
+        maxMemory: document.getElementById('max-memory').value,
+        noNarrative: document.getElementById('no-narrative').checked,
+        noValidation: document.getElementById('no-validation').checked,
+        noNetwork: document.getElementById('no-network').checked,
+        noSushi: document.getElementById('no-sushi').checked,
+        debugging: document.getElementById('debugging').checked
+    };
+}
+
+async function ensureJarExists(version, downloadUrl, ig) {
+    const jarPath = await getJarPath(version);
+    
+    if (fs.existsSync(jarPath)) {
+        appendToIgConsole(ig, 'Using existing JAR: ' + jarPath);
+        return jarPath;
+    }
+    
+    appendToIgConsole(ig, 'Downloading IG Publisher version ' + version + '...');
+    appendToIgConsole(ig, 'Download URL: ' + downloadUrl);
+    
+    try {
+        const response = await fetch(downloadUrl);
+        if (!response.ok) {
+            throw new Error('Download failed: ' + response.status + ' ' + response.statusText);
+        }
+        
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        fs.writeFileSync(jarPath, buffer);
+        appendToIgConsole(ig, 'Downloaded JAR to: ' + jarPath);
+        appendToIgConsole(ig, 'JAR size: ' + (buffer.length / 1024 / 1024).toFixed(1) + ' MB');
+        
+        return jarPath;
+    } catch (error) {
+        appendToIgConsole(ig, 'Failed to download JAR: ' + error.message);
+        throw error;
+    }
+}
+
+function buildIgPublisherCommand(ig, jarPath) {
+    const settings = getCurrentSettings();
+    
+    const command = ['java'];
+    
+    // Add memory setting
+    command.push('-Xmx' + settings.maxMemory + 'G');
+    
+    // Add JAR
+    command.push('-jar');
+    command.push(jarPath);
+    
+    // Add IG folder
+    command.push('-ig');
+    command.push(ig.folder);
+    
+    // Add optional parameters
+    if (settings.terminologyServer && settings.terminologyServer.trim()) {
+        command.push('-tx');
+        command.push(settings.terminologyServer.trim());
+    }
+    
+    if (settings.noNarrative) {
+        command.push('-no-narrative');
+    }
+    
+    if (settings.noValidation) {
+        command.push('-no-validation');
+    }
+    
+    if (settings.noNetwork) {
+        command.push('-no-network');
+    }
+    
+    if (settings.noSushi) {
+        command.push('-no-sushi');
+    }
+    
+    if (settings.debugging) {
+        command.push('-debug');
+    }
+    
+    return command;
+}
+
+function getCurrentSettings() {
+    return {
+        terminologyServer: document.getElementById('terminology-server').value,
+        igPublisherVersion: document.getElementById('ig-publisher-version').value,
+        maxMemory: document.getElementById('max-memory').value,
+        noNarrative: document.getElementById('no-narrative').checked,
+        noValidation: document.getElementById('no-validation').checked,
+        noNetwork: document.getElementById('no-network').checked,
+        noSushi: document.getElementById('no-sushi').checked,
+        debugging: document.getElementById('debugging').checked
+    };
+}
+}
+
+function resetIgConsole(ig, commandGroup) {
+    initializeIgConsole(ig);
+    ig.console = '=== Starting ' + commandGroup + ' ===\n';
+    if (ig === getSelectedIg()) {
+        updateBuildOutputDisplay();
+    }
+}
+
+function appendToIgConsole(ig, text) {
+    initializeIgConsole(ig);
+    const timestamp = new Date().toLocaleTimeString();
+    ig.console += '[' + timestamp + '] ' + text + '\n';
+    
+    if (ig === getSelectedIg()) {
+        updateBuildOutputDisplay();
+    }
+}
+
+function updateBuildOutputDisplay() {
+    const ig = getSelectedIg();
+    if (ig && buildOutput) {
+        initializeIgConsole(ig);
+        buildOutput.textContent = ig.console;
+        buildOutput.scrollTop = buildOutput.scrollHeight;
+    } else if (buildOutput) {
+        buildOutput.textContent = 'No IG selected';
+    }
+}
+
+// Initialize the application
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Starting app...');
+    
+    // Get DOM elements
+    igListBody = document.getElementById('ig-list-body');
+    buildOutput = document.getElementById('build-output');
+    optionsPanel = document.getElementById('options-panel');
+    toggleButton = document.getElementById('btn-toggle-options');
+    
+    // Setup event listeners (now settings functions are defined above)
+    setupEventListeners();
+    setupContextMenus();
+    setupResizer();
+    setupBuildOutput();
+    
+    // Load data
+    loadSettings();
+    loadIgList();
+    updateIgList();
+    updateButtonStates();
+    restorePanelHeights();
+    startFileWatcher();
+
+    // Load publisher versions in background
+    setTimeout(function() {
+
+        loadPublisherVersions().then(function() {
+        }).catch(function(error) {
+            console.log('loadPublisherVersions failed:', error);
+            appendToBuildOutput('Version loading error: ' + error.message);
+        });
+    }, 2000);
+});
+
+// Settings management
+function saveSettings() {
+    try {
+        const settings = {
+            terminologyServer: document.getElementById('terminology-server').value,
+            igPublisherVersion: document.getElementById('ig-publisher-version').value,
+            maxMemory: document.getElementById('max-memory').value,
+            noNarrative: document.getElementById('no-narrative').checked,
+            noValidation: document.getElementById('no-validation').checked,
+            noNetwork: document.getElementById('no-network').checked,
+            noSushi: document.getElementById('no-sushi').checked,
+            debugging: document.getElementById('debugging').checked
+        };
+        
+        localStorage.setItem('igPublisherSettings', JSON.stringify(settings));
+    } catch (error) {
+        console.log('Could not save settings:', error);
+    }
+}
+
+function loadSettings() {
+    try {
+        const settings = JSON.parse(localStorage.getItem('igPublisherSettings') || '{}');
+        
+        if (settings.terminologyServer) {
+            document.getElementById('terminology-server').value = settings.terminologyServer;
+        }
+        if (settings.igPublisherVersion) {
+            document.getElementById('ig-publisher-version').value = settings.igPublisherVersion;
+        }
+        if (settings.maxMemory) {
+            document.getElementById('max-memory').value = settings.maxMemory;
+        } else {
+            document.getElementById('max-memory').value = '8'; // Default to 8GB
+        }
+        
+        document.getElementById('no-narrative').checked = settings.noNarrative || false;
+        document.getElementById('no-validation').checked = settings.noValidation || false;
+        document.getElementById('no-network').checked = settings.noNetwork || false;
+        document.getElementById('no-sushi').checked = settings.noSushi || false;
+        document.getElementById('debugging').checked = settings.debugging || false;
+    } catch (error) {
+        console.log('Could not load settings:', error);
+    }
+}
+
+function getCurrentSettings() {
+    return {
+        terminologyServer: document.getElementById('terminology-server').value,
+        igPublisherVersion: document.getElementById('ig-publisher-version').value,
+        maxMemory: document.getElementById('max-memory').value,
+        noNarrative: document.getElementById('no-narrative').checked,
+        noValidation: document.getElementById('no-validation').checked,
+        noNetwork: document.getElementById('no-network').checked,
+        noSushi: document.getElementById('no-sushi').checked,
+        debugging: document.getElementById('debugging').checked
+    };
+}
+
+async function getJarPath(version) {
+    const userDataPath = await ipcRenderer.invoke('get-user-data-path');
+    const jarsDir = path.join(userDataPath, 'jars');
+    
+    if (!fs.existsSync(jarsDir)) {
+        fs.mkdirSync(jarsDir, { recursive: true });
+    }
+    
+    const jarFileName = 'validator_cli_' + version + '.jar';
+    return path.join(jarsDir, jarFileName);
+}
+
+async function ensureJarExists(version, downloadUrl, ig) {
+    const jarPath = await getJarPath(version);
+    
+    if (fs.existsSync(jarPath)) {
+        appendToIgConsole(ig, 'Using existing JAR: ' + jarPath);
+        return jarPath;
+    }
+    
+    appendToIgConsole(ig, 'Downloading IG Publisher version ' + version + '...');
+    
+    try {
+        const response = await fetch(downloadUrl);
+        if (!response.ok) {
+            throw new Error('Download failed: ' + response.status);
+        }
+        
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        fs.writeFileSync(jarPath, buffer);
+        appendToIgConsole(ig, 'Downloaded JAR: ' + (buffer.length / 1024 / 1024).toFixed(1) + ' MB');
+        
+        return jarPath;
+    } catch (error) {
+        appendToIgConsole(ig, 'Failed to download JAR: ' + error.message);
+        throw error;
+    }
+}
+
+function buildIgPublisherCommand(ig, jarPath) {
+    const settings = getCurrentSettings();
+    
+    const command = ['java'];
+    command.push('-Xmx' + settings.maxMemory + 'G');
+    command.push('-jar');
+    command.push(jarPath);
+    command.push('-ig');
+    command.push(ig.folder);
+    
+    if (settings.terminologyServer && settings.terminologyServer.trim()) {
+        command.push('-tx');
+        command.push(settings.terminologyServer.trim());
+    }
+    
+    if (settings.noNarrative) command.push('-no-narrative');
+    if (settings.noValidation) command.push('-no-validation');
+    if (settings.noNetwork) command.push('-no-network');
+    if (settings.noSushi) command.push('-no-sushi');
+    if (settings.debugging) command.push('-debug');
+    
+    return command;
+}
+
+function setupEventListeners() {
+    // Toolbar buttons
+    document.getElementById('btn-add-folder').addEventListener('click', addFolder);
+    document.getElementById('btn-add-github').addEventListener('click', addFromGitHub);
+    document.getElementById('btn-delete').addEventListener('click', deleteIg);
+    document.getElementById('btn-build').addEventListener('click', buildIg);
+    document.getElementById('btn-stop').addEventListener('click', stopBuild);
+    document.getElementById('btn-open-ig').addEventListener('click', openIG);
+    document.getElementById('btn-open-qa').addEventListener('click', openQA);
+    document.getElementById('btn-copy').addEventListener('click', showCopyMenu);
+    document.getElementById('btn-update').addEventListener('click', updateSource);
+    document.getElementById('btn-tools').addEventListener('click', showToolsMenu);
+    document.getElementById('btn-toggle-options').addEventListener('click', toggleOptionsPanel);
+
+    // Settings change listeners
+    document.getElementById('terminology-server').addEventListener('change', saveSettings);
+    document.getElementById('ig-publisher-version').addEventListener('change', saveSettings);
+    document.getElementById('max-memory').addEventListener('change', saveSettings);
+    document.getElementById('no-narrative').addEventListener('change', saveSettings);
+    document.getElementById('no-validation').addEventListener('change', saveSettings);
+    document.getElementById('no-network').addEventListener('change', saveSettings);
+    document.getElementById('no-sushi').addEventListener('change', saveSettings);
+    document.getElementById('debugging').addEventListener('change', saveSettings);
+
+    // Close context menus when clicking elsewhere
+    document.addEventListener('click', closeContextMenus);
+}
+
+// Settings management
+function saveSettings() {
+    try {
+        const settings = {
+            terminologyServer: document.getElementById('terminology-server').value,
+            igPublisherVersion: document.getElementById('ig-publisher-version').value,
+            maxMemory: document.getElementById('max-memory').value,
+            noNarrative: document.getElementById('no-narrative').checked,
+            noValidation: document.getElementById('no-validation').checked,
+            noNetwork: document.getElementById('no-network').checked,
+            noSushi: document.getElementById('no-sushi').checked,
+            debugging: document.getElementById('debugging').checked
+        };
+        
+        localStorage.setItem('igPublisherSettings', JSON.stringify(settings));
+    } catch (error) {
+        console.log('Could not save settings:', error);
+    }
+}
+
+function loadSettings() {
+    try {
+        const settings = JSON.parse(localStorage.getItem('igPublisherSettings') || '{}');
+        
+        if (settings.terminologyServer) {
+            document.getElementById('terminology-server').value = settings.terminologyServer;
+        }
+        if (settings.igPublisherVersion) {
+            document.getElementById('ig-publisher-version').value = settings.igPublisherVersion;
+        }
+        if (settings.maxMemory) {
+            document.getElementById('max-memory').value = settings.maxMemory;
+        } else {
+            document.getElementById('max-memory').value = '8'; // Default to 8GB
+        }
+        
+        document.getElementById('no-narrative').checked = settings.noNarrative || false;
+        document.getElementById('no-validation').checked = settings.noValidation || false;
+        document.getElementById('no-network').checked = settings.noNetwork || false;
+        document.getElementById('no-sushi').checked = settings.noSushi || false;
+        document.getElementById('debugging').checked = settings.debugging || false;
+    } catch (error) {
+        console.log('Could not load settings:', error);
+    }
+}
+
+function setupContextMenus() {
+    // Tools menu items
+    const toolsMenuItems = document.querySelectorAll('#tools-menu .context-menu-item');
+    for (let i = 0; i < toolsMenuItems.length; i++) {
+        toolsMenuItems[i].addEventListener('click', function(e) {
+            const action = e.target.dataset.action;
+            handleToolsAction(action);
+            closeContextMenus();
+        });
+    }
+}
+
+// Basic functions
+function appendToBuildOutput(text) {
+    const ig = getSelectedIg();
+    if (ig) {
+        appendToIgConsole(ig, text);
+    } else if (buildOutput) {
+        const timestamp = new Date().toLocaleTimeString();
+        buildOutput.textContent += '[' + timestamp + '] ' + text + '\n';
+        buildOutput.scrollTop = buildOutput.scrollHeight;
+    }
+}
+
+function getSelectedIg() {
+    if (selectedIgIndex >= 0 && selectedIgIndex < igList.length) {
+        return igList[selectedIgIndex];
+    }
+    return null;
+}
+
+// IG Publisher JAR management and execution
+async function getJarPath(version) {
+    // Get the user data directory for storing JARs
+    const userDataPath = await ipcRenderer.invoke('get-user-data-path');
+    const jarsDir = path.join(userDataPath, 'jars');
+    
+    // Ensure jars directory exists
+    if (!fs.existsSync(jarsDir)) {
+        fs.mkdirSync(jarsDir, { recursive: true });
+    }
+    
+    const jarFileName = 'validator_cli_' + version + '.jar';
+    return path.join(jarsDir, jarFileName);
+}
+
+function updateIgList() {
+    if (!igListBody) return;
+    
+    igListBody.innerHTML = '';
+    
+    for (let i = 0; i < igList.length; i++) {
+        const ig = igList[i];
+        const row = document.createElement('tr');
+        if (i === selectedIgIndex) {
+            row.classList.add('selected');
+        }
+        
+        const index = i; // Capture for closure
+        row.addEventListener('click', function() {
+            selectedIgIndex = index;
+            updateIgList();
+            updateBuildOutputDisplay();
+            updateButtonStates();
+        });
+
+        // Right click - show context menu
+        row.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            selectedIgIndex = index; // Select the row that was right-clicked
+            updateIgList();
+            updateBuildOutputDisplay();
+            updateButtonStates();
+            showIgContextMenu(e);
+        });
+
+        const statusClass = getStatusClass(ig.buildStatus || 'Not Built');
+        
+        row.innerHTML = 
+            '<td>' + ig.name + '</td>' +
+            '<td>' + ig.version + '</td>' +
+            '<td>' + ig.folder + '</td>' +
+            '<td><span class="status-badge ' + statusClass + '">' + (ig.buildStatus || 'Not Built') + '</span></td>' +
+            '<td>' + (ig.buildTime || '-') + '</td>' +
+            '<td>' + (ig.builtSize || '-') + '</td>';
+        
+        igListBody.appendChild(row);
+    }
+
+    // Auto-select first item if none selected
+    if (selectedIgIndex === -1 && igList.length > 0) {
+        selectedIgIndex = 0;
+        updateBuildOutputDisplay();
+        updateButtonStates();
+    }
+}
+
+function getStatusClass(status) {
+    const statusMap = {
+        'Success': 'status-success',
+        'Error': 'status-error',
+        'Building': 'status-building',
+        'Not Built': 'status-none'
+    };
+    return statusMap[status] || 'status-none';
+}
+
+// Button state management
+function updateButtonStates() {
+    const ig = getSelectedIg();
+    const hasSelection = ig !== null;
+    const isBuilding = hasSelection && buildProcesses.has(selectedIgIndex);
+    const isGitRepo = hasSelection && checkIfGitRepo(ig ? ig.folder : null);
+    
+    setButtonState('btn-delete', hasSelection);
+    setButtonState('btn-build', hasSelection && !isBuilding);
+    setButtonState('btn-stop', hasSelection && isBuilding);
+    setButtonState('btn-open-ig', hasSelection && checkFileExists(ig ? ig.folder : null, 'output/index.html'));
+    setButtonState('btn-open-qa', hasSelection && checkFileExists(ig ? ig.folder : null, 'output/qa.html'));
+    setButtonState('btn-copy', hasSelection);
+    setButtonState('btn-update', hasSelection && isGitRepo);
+    setButtonState('btn-tools', hasSelection);
+}
+
+function setButtonState(buttonId, enabled) {
+    const button = document.getElementById(buttonId);
+    if (button) {
+        button.disabled = !enabled;
+    }
+}
+
+function checkFileExists(folder, relativePath) {
+    if (!folder) return false;
+    try {
+        const fullPath = path.join(folder, relativePath);
+        return fs.existsSync(fullPath);
+    } catch (error) {
+        return false;
+    }
+}
+
+function checkIfGitRepo(folder) {
+    if (!folder) return false;
+    try {
+        const gitPath = path.join(folder, '.git');
+        return fs.existsSync(gitPath);
+    } catch (error) {
+        return false;
+    }
+}
+
+function startFileWatcher() {
+    fileWatcher = setInterval(function() {
+        updateButtonStates();
+    }, 5000);
+}
+
+async function addFolder() {
+    try {
+        const result = await ipcRenderer.invoke('select-folder');
+        if (!result.canceled && result.filePaths.length > 0) {
+            const folderPath = result.filePaths[0];
+            await addIgFromFolder(folderPath);
+        }
+    } catch (error) {
+        appendToBuildOutput('Error adding folder: ' + error.message);
+    }
+}
+
+async function getPackageId(folder) {
+    try {
+        // Read ig.ini file
+        const igIniPath = path.join(folder, 'ig.ini');
+        if (!fs.existsSync(igIniPath)) {
+            throw new Error('ig.ini not found');
+        }
+
+        const iniContent = fs.readFileSync(igIniPath, 'utf8');
+
+        // Parse INI file to find ig= in [IG] section
+        const lines = iniContent.split('\n');
+        let inIGSection = false;
+        let igResourcePath = null;
+
+        for (const line of lines) {
+            const trimmedLine = line.trim();
+
+            if (trimmedLine === '[IG]') {
+                inIGSection = true;
+                continue;
+            }
+
+            if (trimmedLine.startsWith('[') && trimmedLine.endsWith(']')) {
+                inIGSection = false;
+                continue;
+            }
+
+            if (inIGSection && (trimmedLine.startsWith('ig=') || trimmedLine.startsWith('ig ='))) {
+                if (trimmedLine.startsWith('ig=')) {
+                    igResourcePath = trimmedLine.substring(3).trim();
+                } else {
+                    igResourcePath = trimmedLine.substring(4).trim();
+                }
+                break;
+            }
+        }
+
+        if (!igResourcePath) {
+            throw new Error('No ig= found in [IG] section');
+        }
+
+        // Read the IG resource file
+        const igResourceFullPath = path.join(folder, igResourcePath);
+        if (!fs.existsSync(igResourceFullPath)) {
+            // IG resource file doesn't exist - try SUSHI config fallback
+            return await getSushiConfigInfo(folder, igResourcePath);
+        }
+        const resourceContent = fs.readFileSync(igResourceFullPath, 'utf8');
+        let igResource;
+
+        // Try to parse as JSON first, then XML
+        try {
+            igResource = JSON.parse(resourceContent);
+        } catch (jsonError) {
+            // Try XML parsing
+            try {
+                igResource = parseXmlIgResource(resourceContent);
+            } catch (xmlError) {
+                throw new Error(`Failed to parse IG resource as JSON or XML. JSON error: ${jsonError.message}, XML error: ${xmlError.message}`);
+            }
+        }
+
+        // Extract packageId and version from FHIR ImplementationGuide
+        if (igResource.resourceType !== 'ImplementationGuide') {
+            throw new Error('Resource is not an ImplementationGuide');
+        }
+
+        const packageId = igResource.packageId;
+        const version = igResource.version;
+        const title = igResource.title;
+
+        if (!packageId) {
+            throw new Error('No packageId found in ImplementationGuide');
+        }
+
+        const result = version ? `${packageId}#${version}` : packageId;
+
+        return {
+            packageId: packageId,
+            version: version || 'Unknown',
+            title: title || packageId,
+            fullPackageId: result
+        };
+
+    } catch (error) {
+        throw new Error(`Failed to get package ID: ${error.message}`);
+    }
+}
+
+async function getSushiConfigInfo(folder, missingIgResourcePath) {
+    const sushiConfigPath = path.join(folder, 'sushi-config.yaml');
+
+    if (!fs.existsSync(sushiConfigPath)) {
+        throw new Error(`IG resource file not found: ${missingIgResourcePath}, and no sushi-config.yaml fallback available`);
+    }
+
+    try {
+        const YAML = require('yaml');
+        const sushiContent = fs.readFileSync(sushiConfigPath, 'utf8');
+        const sushiConfig = YAML.parse(sushiContent);
+
+        if (!sushiConfig) {
+            throw new Error('Failed to parse sushi-config.yaml');
+        }
+
+        // Extract id, version, and title from SUSHI config
+        const packageId = sushiConfig.id;
+        const version = sushiConfig.version;
+        const title = sushiConfig.title || sushiConfig.name;
+
+        if (!packageId) {
+            throw new Error('No id found in sushi-config.yaml');
+        }
+
+        const result = version ? `${packageId}#${version}` : packageId;
+
+        return {
+            packageId: packageId,
+            version: version || 'Unknown',
+            title: title || packageId,
+            fullPackageId: result,
+            source: 'sushi-config.yaml' // Indicate the source for debugging
+        };
+
+    } catch (yamlError) {
+        throw new Error(`Failed to parse sushi-config.yaml: ${yamlError.message}`);
+    }
+}
+
+function parseXmlIgResource(xmlContent) {
+    // Simple XML parsing for FHIR ImplementationGuide
+    // This is a basic implementation - for production, consider using a proper XML parser
+
+    const result = {
+        resourceType: 'ImplementationGuide'
+    };
+
+    // Extract packageId
+    const packageIdMatch = xmlContent.match(/<packageId[^>]*value="([^"]+)"/);
+    if (packageIdMatch) {
+        result.packageId = packageIdMatch[1];
+    }
+
+    // Extract version
+    const versionMatch = xmlContent.match(/<version[^>]*value="([^"]+)"/);
+    if (versionMatch) {
+        result.version = versionMatch[1];
+    }
+
+    // Extract title
+    const titleMatch = xmlContent.match(/<title[^>]*value="([^"]+)"/);
+    if (titleMatch) {
+        result.title = titleMatch[1];
+    }
+
+    // Alternative: extract from text content if attributes don't work
+    if (!result.packageId) {
+        const packageIdTextMatch = xmlContent.match(/<packageId[^>]*>([^<]+)<\/packageId>/);
+        if (packageIdTextMatch) {
+            result.packageId = packageIdTextMatch[1].trim();
+        }
+    }
+
+    if (!result.version) {
+        const versionTextMatch = xmlContent.match(/<version[^>]*>([^<]+)<\/version>/);
+        if (versionTextMatch) {
+            result.version = versionTextMatch[1].trim();
+        }
+    }
+
+    if (!result.title) {
+        const titleTextMatch = xmlContent.match(/<title[^>]*>([^<]+)<\/title>/);
+        if (titleTextMatch) {
+            result.title = titleTextMatch[1].trim();
+        }
+    }
+
+    return result;
+}
+
+async function addIgFromFolder(folderPath) {
+    try {
+        let igName = path.basename(folderPath);
+        let version = 'Unknown';
+
+        // Try to get proper name and version from IG resource
+        try {
+            const packageInfo = await getPackageId(folderPath);
+            igName = packageInfo.packageId;
+            version = packageInfo.version;
+        } catch (error) {
+            // Fallback to reading ig.ini directly
+            appendToBuildOutput(`Could not read IG resource (${error.message}), using fallback method`);
+
+            const igIniPath = path.join(folderPath, 'ig.ini');
+            if (fs.existsSync(igIniPath)) {
+                const iniContent = fs.readFileSync(igIniPath, 'utf8');
+                const nameMatch = iniContent.match(/title\s*=\s*(.+)/);
+                const versionMatch = iniContent.match(/version\s*=\s*(.+)/);
+
+                if (nameMatch) igName = nameMatch[1].trim();
+                if (versionMatch) version = versionMatch[1].trim();
+            }
+        }
+
+        const newIg = {
+            name: igName,
+            version: version,
+            folder: folderPath,
+            buildStatus: 'Not Built',
+            buildTime: '-',
+            builtSize: '-',
+            console: ''
+        };
+
+        igList.push(newIg);
+        updateIgList();
+        saveIgList();
+    } catch (error) {
+        appendToBuildOutput('Error adding IG: ' + error.message);
+    }
+}
+
+
+async function deleteIg() {
+    const ig = getSelectedIg();
+    if (!ig) return;
+
+    const choice = await showDeleteDialog(ig.name, ig.folder);
+
+    if (choice === 'cancel') {
+        return;
+    }
+
+    if (choice === 'delete-folder') {
+        // Delete the folder from disk AND remove from list
+        try {
+            await ipcRenderer.invoke('delete-folder', ig.folder);
+
+            // Remove from list
+            igList.splice(selectedIgIndex, 1);
+            selectedIgIndex = Math.max(0, Math.min(selectedIgIndex, igList.length - 1));
+            updateIgList();
+            saveIgList();
+            updateButtonStates();
+
+        } catch (error) {
+            appendToBuildOutput('✗ Failed to delete folder: ' + error.message);
+        }
+    } else if (choice === 'remove-only') {
+        // Just remove from list (original behavior)
+        igList.splice(selectedIgIndex, 1);
+        selectedIgIndex = Math.max(0, Math.min(selectedIgIndex, igList.length - 1));
+        updateIgList();
+        saveIgList();
+        updateButtonStates();
+    }
+}
+
+function showDeleteDialog(igName, folderPath) {
+    return new Promise(function(resolve) {
+        const dialog = document.createElement('div');
+        dialog.innerHTML =
+          '<div class="dialog-overlay">' +
+          '<div class="dialog">' +
+          '<div class="dialog-header">Delete "' + igName + '"</div>' +
+          '<div class="dialog-content">' +
+          '<p>What would you like to do?</p>' +
+          '<div class="folder-info">' +
+          '<strong>Folder:</strong> ' + folderPath +
+          '</div>' +
+          '<div class="warning-text">' +
+          '⚠️ Deleting the folder will permanently remove all files and cannot be undone!' +
+          '</div>' +
+          '</div>' +
+          '<div class="dialog-buttons">' +
+          '<button onclick="resolveDeleteDialog(\'cancel\')" class="btn-cancel">Cancel</button>' +
+          '<button onclick="resolveDeleteDialog(\'remove-only\')" class="btn-cancel">Remove from List Only</button>' +
+          '<button onclick="resolveDeleteDialog(\'delete-folder\')" class="btn-delete">Delete Folder from Disk</button>' +
+          '</div>' +
+          '</div>' +
+          '</div>';
+
+        // Add resolver function to window
+        window.resolveDeleteDialog = function(value) {
+            document.body.removeChild(dialog);
+            delete window.resolveDeleteDialog;
+            resolve(value);
+        };
+
+        document.body.appendChild(dialog);
+    });
+}
+
+function buildIg() {
+    const ig = getSelectedIg();
+    if (!ig) return;
+    
+    // Check if this IG is already building
+    if (buildProcesses.has(selectedIgIndex)) {
+        appendToBuildOutput('Build already in progress for ' + ig.name);
+        return;
+    }
+    
+    resetIgConsole(ig, 'IG Publisher Build');
+    appendToIgConsole(ig, 'Starting build for ' + ig.name);
+    ig.buildStatus = 'Building';
+    updateIgList();
+    updateButtonStates();
+    
+    // Start the actual IG Publisher build
+    startIgPublisherBuild(ig);
+}
+
+async function startIgPublisherBuild(ig) {
+    try {
+        const settings = getCurrentSettings();
+        let version = settings.igPublisherVersion;
+        let downloadUrl = null;
+        
+        // Get download URL for the selected version
+        if (version === 'latest') {
+            // Use the first version from our loaded versions, or fallback
+            const savedVersions = loadSavedPublisherVersions();
+            if (savedVersions && savedVersions.length > 0) {
+                version = savedVersions[0].version;
+                downloadUrl = savedVersions[0].url;
+                appendToIgConsole(ig, 'Using latest version: ' + version);
+            } else {
+                throw new Error('No publisher versions available. Please check internet connection.');
+            }
+        } else {
+            // Find the download URL for the specific version
+            const savedVersions = loadSavedPublisherVersions();
+            if (savedVersions) {
+                for (let i = 0; i < savedVersions.length; i++) {
+                    if (savedVersions[i].version === version) {
+                        downloadUrl = savedVersions[i].url;
+                        break;
+                    }
+                }
+            }
+            
+            if (!downloadUrl) {
+                throw new Error('Download URL not found for version ' + version);
+            }
+        }
+        
+        appendToIgConsole(ig, 'IG Publisher version: ' + version);
+        appendToIgConsole(ig, 'Memory limit: ' + settings.maxMemory + 'GB');
+        
+        // Ensure JAR exists (download if necessary)
+        const jarPath = await ensureJarExists(version, downloadUrl, ig);
+        
+        // Build command
+        const command = buildIgPublisherCommand(ig, jarPath);
+        appendToIgConsole(ig, 'Command: ' + command.join(' '));
+        
+        // Start the Java process
+        const buildProcess = await runIgPublisherProcess(ig, command);
+        
+        // Store the process for stopping if needed
+        buildProcesses.set(selectedIgIndex, buildProcess);
+        
+    } catch (error) {
+        appendToIgConsole(ig, 'Build setup failed: ' + error.message);
+        ig.buildStatus = 'Error';
+        updateIgList();
+        updateButtonStates();
+    }
+}
+
+
+function stripAnsiCodes(text) {
+    // ANSI escape sequence regex - matches control characters like [0;39m, [32m, etc.
+    const ansiRegex = /\x1b\[[0-9;]*[mGKHF]/g;
+    return text.replace(ansiRegex, '');
+}
+
+function runIgPublisherProcess(ig, command) {
+    return new Promise(function(resolve, reject) {
+        const spawn = require('child_process').spawn;
+
+        appendToIgConsole(ig, 'Starting IG Publisher process...');
+
+        const javaProcess = spawn(command[0], command.slice(1), {
+            cwd: ig.folder,
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let hasOutput = false;
+        let wasTerminated = false;
+        const startTime = Date.now();
+
+        // Create the process control object that we'll return
+        const processControl = {
+            kill: function() {
+                wasTerminated = true;
+                try {
+                    // Try graceful termination first
+                    javaProcess.kill('SIGTERM');
+
+                    // If it doesn't respond in 5 seconds, force kill
+                    setTimeout(function() {
+                        if (!javaProcess.killed) {
+                            appendToIgConsole(ig, 'Process not responding, forcing termination...');
+                            javaProcess.kill('SIGKILL');
+                        }
+                    }, 5000);
+
+                } catch (error) {
+                    appendToIgConsole(ig, 'Error terminating process: ' + error.message);
+                }
+            },
+            pid: javaProcess.pid
+        };
+
+        javaProcess.stdout.on('data', function(data) {
+            hasOutput = true;
+            const text = data.toString();
+            const lines = text.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    const cleanLine = stripAnsiCodes(lines[i].trim());
+                    appendToIgConsole(ig, cleanLine);
+                }
+            }
+        });
+
+        javaProcess.stderr.on('data', function(data) {
+            hasOutput = true;
+            const text = data.toString();
+            const lines = text.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    const cleanLine = stripAnsiCodes(lines[i].trim());
+                    appendToIgConsole(ig, cleanLine);
+                }
+            }
+        });
+
+        javaProcess.on('close', function(code, signal) {
+            const endTime = Date.now();
+            const duration = Math.round((endTime - startTime) / 1000);
+            const minutes = Math.floor(duration / 60);
+            const seconds = duration % 60;
+            const timeString = minutes + ':' + seconds.toString().padStart(2, '0');
+
+            // Remove from tracking when process ends
+            buildProcesses.delete(selectedIgIndex);
+
+            if (wasTerminated) {
+                ig.buildStatus = 'Stopped';
+                ig.buildTime = timeString;
+                appendToIgConsole(ig, '⏹ Build terminated by user after ' + timeString);
+            } else if (code === 0) {
+                ig.buildStatus = 'Success';
+                ig.buildTime = timeString;
+
+                // Try to get output size
+                try {
+                    const outputPath = path.join(ig.folder, 'output');
+                    if (fs.existsSync(outputPath)) {
+                        const stats = getDirectorySize(outputPath);
+                        ig.builtSize = (stats / 1024 / 1024).toFixed(1) + ' MB';
+                    }
+                } catch (error) {
+                    ig.builtSize = 'Unknown';
+                }
+
+                appendToIgConsole(ig, '✓ Build completed successfully');
+                appendToIgConsole(ig, 'Build time: ' + timeString);
+                appendToIgConsole(ig, 'Output size: ' + ig.builtSize);
+            } else {
+                ig.buildStatus = 'Error';
+                ig.buildTime = timeString;
+                const exitReason = signal ? ` (signal: ${signal})` : ` (exit code: ${code})`;
+                appendToIgConsole(ig, '✗ Build failed' + exitReason);
+                appendToIgConsole(ig, 'Build time: ' + timeString);
+            }
+
+            updateIgList();
+            updateButtonStates();
+            saveIgList();
+        });
+
+        javaProcess.on('error', function(error) {
+            buildProcesses.delete(selectedIgIndex);
+            ig.buildStatus = 'Error';
+
+            if (error.code === 'ENOENT') {
+                appendToIgConsole(ig, '✗ Java not found. Please install Java and ensure it\'s in your PATH.');
+            } else {
+                appendToIgConsole(ig, '✗ Process error: ' + error.message);
+            }
+
+            updateIgList();
+            updateButtonStates();
+            reject(error);
+        });
+
+        // Return the process control object immediately
+        resolve(processControl);
+    });
+}
+
+function getDirectorySize(dirPath) {
+    let totalSize = 0;
+    
+    function calculateSize(currentPath) {
+        const stats = fs.statSync(currentPath);
+        if (stats.isFile()) {
+            totalSize += stats.size;
+        } else if (stats.isDirectory()) {
+            const files = fs.readdirSync(currentPath);
+            for (let i = 0; i < files.length; i++) {
+                calculateSize(path.join(currentPath, files[i]));
+            }
+        }
+    }
+    
+    try {
+        calculateSize(dirPath);
+    } catch (error) {
+        // Ignore errors (permission issues, etc.)
+    }
+    
+    return totalSize;
+}
+
+function stopBuild() {
+    const ig = getSelectedIg();
+    if (!ig || !buildProcesses.has(selectedIgIndex)) {
+        return;
+    }
+
+    appendToBuildOutput('Stopping build for ' + ig.name + '...');
+
+    // Get the process object and kill it
+    const buildProcess = buildProcesses.get(selectedIgIndex);
+    if (buildProcess && buildProcess.kill) {
+        try {
+            buildProcess.kill();
+            appendToIgConsole(ig, 'Build process terminated by user');
+        } catch (error) {
+            appendToIgConsole(ig, 'Error stopping process: ' + error.message);
+        }
+    }
+
+    // Remove from tracking map
+    buildProcesses.delete(selectedIgIndex);
+
+    // Update UI
+    ig.buildStatus = 'Stopped';
+    updateIgList();
+    updateButtonStates();
+
+}
+
+async function openIG() {
+    const ig = getSelectedIg();
+    if (!ig) return;
+
+    const indexPath = path.join(ig.folder, 'output', 'index.html');
+
+    try {
+        if (fs.existsSync(indexPath)) {
+            // Use proper file URL format
+            const fileUrl = 'file://' + indexPath.replace(/\\/g, '/');
+            appendToBuildOutput('Opening IG: ' + fileUrl);
+            await ipcRenderer.invoke('open-external', fileUrl);
+        } else {
+            appendToBuildOutput('Build output not found: ' + indexPath);
+            appendToBuildOutput('Build the IG first to generate output files');
+        }
+    } catch (error) {
+        appendToBuildOutput('Failed to open IG: ' + error.message);
+    }
+}
+
+async function openQA() {
+    const ig = getSelectedIg();
+    if (!ig) return;
+
+    const qaPath = path.join(ig.folder, 'output', 'qa.html');
+
+    try {
+        if (fs.existsSync(qaPath)) {
+            // Use proper file URL format
+            const fileUrl = 'file://' + qaPath.replace(/\\/g, '/');
+            appendToBuildOutput('Opening QA: ' + fileUrl);
+            await ipcRenderer.invoke('open-external', fileUrl);
+        } else {
+            appendToBuildOutput('QA report not found: ' + qaPath);
+            appendToBuildOutput('Build the IG first to generate QA report');
+        }
+    } catch (error) {
+        appendToBuildOutput('Failed to open QA: ' + error.message);
+    }
+}
+
+async function updateSource() {
+    const ig = getSelectedIg();
+    
+    if (!ig) {
+        return;
+    }
+    
+    if (!checkIfGitRepo(ig.folder)) {
+        appendToBuildOutput('This IG is not a git repository');
+        return;
+    }
+
+    // Use proper dialog instead of prompt()
+    const choice = await showUpdateDialog(ig.name);
+    
+    if (choice && choice !== 'cancel') {
+        performGitUpdate(ig, choice);
+    } else {
+    }
+}
+
+function showUpdateDialog(igName) {
+    return new Promise(function(resolve) {
+        const dialog = document.createElement('div');
+        dialog.innerHTML = 
+            '<div class="dialog-overlay">' +
+                '<div class="dialog">' +
+                    '<div class="dialog-header">Update "' + igName + '"</div>' +
+                    '<div class="dialog-content">' +
+                        '<p>How would you like to update the source?</p>' +
+                    '</div>' +
+                    '<div class="dialog-buttons">' +
+                        '<button onclick="resolveUpdateDialog(\'cancel\')" class="btn-cancel">Cancel</button>' +
+                        '<button onclick="resolveUpdateDialog(\'pull-only\')" class="btn-cancel">Just Pull</button>' +
+                        '<button onclick="resolveUpdateDialog(\'reset-pull\')" class="btn-cancel">Reset & Pull</button>' +
+                        '<button onclick="resolveUpdateDialog(\'stash-pull-pop\')" class="btn-ok">Stash, Pull, Pop</button>' +
+                    '</div>' +
+                '</div>' +
+            '</div>';
+        
+        // Add resolver function to window
+        window.resolveUpdateDialog = function(value) {
+            document.body.removeChild(dialog);
+            delete window.resolveUpdateDialog;
+            resolve(value);
+        };
+        
+        document.body.appendChild(dialog);
+    });
+}
+
+// Git operations
+async function performGitUpdate(ig, operation) {
+    resetIgConsole(ig, 'Git Update');
+    appendToIgConsole(ig, '*** WORKING GIT VERSION ***');
+    appendToIgConsole(ig, 'Updating ' + ig.name + ' (' + operation + ')');
+    
+    try {
+        switch (operation) {
+            case 'stash-pull-pop':
+                appendToIgConsole(ig, '>>> STEP 1: Stashing changes');
+                await runGitCommand(ig, ['stash']);
+                appendToIgConsole(ig, '>>> STEP 2: Pulling latest changes');
+                await runGitCommand(ig, ['pull']);
+                appendToIgConsole(ig, '>>> STEP 3: Restoring stashed changes');
+                await runGitCommand(ig, ['stash', 'pop']);
+                break;
+            case 'reset-pull':
+                appendToIgConsole(ig, '>>> STEP 1: Resetting to HEAD');
+                await runGitCommand(ig, ['reset', '--hard', 'HEAD']);
+                appendToIgConsole(ig, '>>> STEP 2: Pulling latest changes');
+                await runGitCommand(ig, ['pull']);
+                break;
+            case 'pull-only':
+                appendToIgConsole(ig, '>>> STEP 1: Pulling latest changes');
+                await runGitCommand(ig, ['pull']);
+                break;
+        }
+        
+        appendToIgConsole(ig, 'All git operations completed successfully');
+        
+    } catch (error) {
+        appendToIgConsole(ig, 'Git update failed: ' + error.message);
+    }
+}
+
+function runGitCommand(ig, args) {
+    return new Promise(function(resolve, reject) {
+        const spawn = require('child_process').spawn;
+        
+        appendToIgConsole(ig, '> git ' + args.join(' '));
+        
+        const git = spawn('git', args, { 
+            cwd: ig.folder,
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+        
+        let hasOutput = false;
+        
+        git.stdout.on('data', function(data) {
+            hasOutput = true;
+            const text = data.toString();
+            const lines = text.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    appendToIgConsole(ig, '  ' + lines[i].trim());
+                }
+            }
+        });
+        
+        git.stderr.on('data', function(data) {
+            hasOutput = true;
+            const text = data.toString();
+            const lines = text.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    appendToIgConsole(ig, '  ' + lines[i].trim());
+                }
+            }
+        });
+        
+        git.on('close', function(code) {
+            if (code !== 0) {
+                const errorMsg = 'Command failed with exit code ' + code;
+                appendToIgConsole(ig, errorMsg);
+                reject(new Error(errorMsg));
+            } else {
+                if (!hasOutput) {
+                    appendToIgConsole(ig, '  (no output)');
+                }
+                appendToIgConsole(ig, '✓ Command completed');
+                resolve();
+            }
+        });
+        
+        git.on('error', function(error) {
+            appendToIgConsole(ig, 'Git error: ' + error.message);
+            reject(error);
+        });
+    });
+}
+
+// Copy menu
+function showCopyMenu(event) {
+    const ig = getSelectedIg();
+    if (!ig) return;
+
+    buildCopyMenuItems(ig).then(function(menuItems) {
+        const menu = document.getElementById('copy-menu');
+        menu.innerHTML = '';
+
+        for (let i = 0; i < menuItems.length; i++) {
+            const item = menuItems[i];
+            const menuItem = document.createElement('div');
+            menuItem.className = 'context-menu-item';
+            menuItem.textContent = item.label;
+            menuItem.addEventListener('click', function() {
+                handleCopyAction(item.action, item.value);
+                closeContextMenus();
+            });
+            menu.appendChild(menuItem);
+        }
+
+        const rect = event.target.getBoundingClientRect();
+        menu.style.display = 'block';
+        menu.style.left = rect.left + 'px';
+        menu.style.top = (rect.bottom + 5) + 'px';
+
+        event.stopPropagation();
+    });
+}
+
+async function buildCopyMenuItems(ig) {
+    const items = [];
+
+    items.push({
+        action: 'copy-folder-path',
+        label: 'Folder Path',
+        value: ig.folder
+    });
+
+    // Try to get package ID
+    try {
+        const packageInfo = await getPackageId(ig.folder);
+        items.push({
+            action: 'copy-package-id',
+            label: 'Package ID',
+            value: packageInfo.fullPackageId
+        });
+    } catch (error) {
+        // Package ID not available
+        appendToBuildOutput('Package ID not available: ' + error.message);
+    }
+
+    try {
+        const gitUrl = await getGitRemoteUrl(ig.folder);
+        if (gitUrl) {
+            items.push({
+                action: 'copy-github-url',
+                label: 'GitHub Repository URL',
+                value: gitUrl
+            });
+        }
+    } catch (error) {
+        // Skip git URL if not available
+    }
+
+    initializeIgConsole(ig);
+    items.push({
+        action: 'copy-build-log',
+        label: 'Last Build Log',
+        value: ig.console
+    });
+
+    const jekyllCommand = 'cd "' + path.join(ig.folder, 'temp', 'pages') + '" && jekyll build --destination "' + path.join(ig.folder, 'output') + '"';
+    items.push({
+        action: 'copy-jekyll-command',
+        label: 'Jekyll Command',
+        value: jekyllCommand
+    });
+
+    return items;
+}
+
+async function getGitRemoteUrl(folder) {
+    return new Promise(function(resolve, reject) {
+        if (!fs.existsSync(path.join(folder, '.git'))) {
+            reject(new Error('Not a git repository'));
+            return;
+        }
+        
+        const spawn = require('child_process').spawn;
+        const git = spawn('git', ['remote', '-v'], { 
+            cwd: folder,
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+        
+        let output = '';
+        
+        git.stdout.on('data', function(data) {
+            output += data.toString();
+        });
+        
+        git.on('close', function(code) {
+            if (code !== 0) {
+                reject(new Error('Git command failed'));
+                return;
+            }
+            
+            const lines = output.split('\n');
+            const fetchLines = [];
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].includes('(fetch)')) {
+                    fetchLines.push(lines[i]);
+                }
+            }
+            
+            if (fetchLines.length === 0) {
+                reject(new Error('No fetch remote found'));
+                return;
+            }
+            
+            const match = fetchLines[0].match(/\s+(.+?)\s+\(fetch\)/);
+            if (match && match[1]) {
+                let url = match[1];
+                if (url.startsWith('git@github.com:')) {
+                    url = url.replace('git@github.com:', 'https://github.com/');
+                }
+                if (url.endsWith('.git')) {
+                    url = url.slice(0, -4);
+                }
+                resolve(url);
+            } else {
+                reject(new Error('Could not parse remote URL'));
+            }
+        });
+        
+        git.on('error', function(error) {
+            reject(error);
+        });
+    });
+}
+
+function handleCopyAction(action, value) {
+    if (!value) {
+        return;
+    }
+    
+    navigator.clipboard.writeText(value).then(function() {
+        const actionName = action.replace('copy-', '').replace('-', ' ');
+    }).catch(function(err) {
+        appendToBuildOutput('Failed to copy to clipboard: ' + err.message);
+    });
+}
+
+function showToolsMenu(event) {
+    const menu = document.getElementById('tools-menu');
+    const rect = event.target.getBoundingClientRect();
+    
+    menu.style.display = 'block';
+    menu.style.left = rect.left + 'px';
+    menu.style.top = (rect.bottom + 5) + 'px';
+    
+    event.stopPropagation();
+}
+
+async function handleToolsAction(action) {
+    const ig = getSelectedIg();
+    if (!ig) {
+        return;
+    }
+
+    switch (action) {
+        case 'clear-txcache':
+            await clearTxCache(ig);
+            break;
+        case 'open-folder':
+            await openFolder(ig);
+            break;
+        case 'open-terminal':
+            await openTerminal(ig);
+            break;
+        case 'run-jekyll':
+            await runJekyll(ig);
+            break;
+        case 'open-settings':
+            await openSettingsFile();
+            break;
+    }
+}
+
+async function clearTxCache(ig) {
+    const txCachePath = path.join(ig.folder, 'input-cache', 'txcache');
+
+    try {
+
+        if (!fs.existsSync(txCachePath)) {
+            appendToBuildOutput('TxCache folder not found: ' + txCachePath);
+            return;
+        }
+
+        // Delete all contents of txcache folder
+        const files = fs.readdirSync(txCachePath);
+        let deletedCount = 0;
+
+        for (const file of files) {
+            const filePath = path.join(txCachePath, file);
+            const stats = fs.statSync(filePath);
+
+            if (stats.isDirectory()) {
+                await ipcRenderer.invoke('delete-folder', filePath);
+            } else {
+                fs.unlinkSync(filePath);
+            }
+            deletedCount++;
+        }
+
+        appendToBuildOutput('✓ Cleared ' + deletedCount + ' items from TxCache');
+
+    } catch (error) {
+        appendToBuildOutput('✗ Failed to clear TxCache: ' + error.message);
+    }
+}
+
+async function openFolder(ig) {
+    try {
+        await ipcRenderer.invoke('show-item-in-folder', ig.folder);
+    } catch (error) {
+        appendToBuildOutput('✗ Failed to open folder: ' + error.message);
+    }
+}
+
+async function openTerminal(ig) {
+    try {
+        await ipcRenderer.invoke('open-terminal', ig.folder);
+    } catch (error) {
+        appendToBuildOutput('✗ Failed to open terminal: ' + error.message);
+    }
+}
+
+async function runJekyll(ig) {
+    // Check if Jekyll is already running for this IG
+    if (buildProcesses.has(selectedIgIndex)) {
+        appendToBuildOutput('Another process is already running for ' + ig.name);
+        return;
+    }
+
+    try {
+        const pagesPath = path.join(ig.folder, 'temp', 'pages');
+        const outputPath = path.join(ig.folder, 'output');
+
+        if (!fs.existsSync(pagesPath)) {
+            appendToBuildOutput('✗ Jekyll source folder not found: ' + pagesPath);
+            appendToBuildOutput('Build the IG first to generate Jekyll pages');
+            return;
+        }
+
+        resetIgConsole(ig, 'Jekyll Build');
+        appendToIgConsole(ig, 'Starting Jekyll build...');
+        appendToIgConsole(ig, 'Source: ' + pagesPath);
+        appendToIgConsole(ig, 'Destination: ' + outputPath);
+
+        ig.buildStatus = 'Building';
+        updateIgList();
+        updateButtonStates();
+
+        const jekyllProcess = await runJekyllProcess(ig, pagesPath, outputPath);
+        buildProcesses.set(selectedIgIndex, jekyllProcess);
+
+    } catch (error) {
+        appendToIgConsole(ig, '✗ Jekyll setup failed: ' + error.message);
+        ig.buildStatus = 'Error';
+        updateIgList();
+        updateButtonStates();
+    }
+}
+
+// Jekyll process runner
+function runJekyllProcess(ig, sourcePath, outputPath) {
+    return new Promise(function(resolve, reject) {
+        const spawn = require('child_process').spawn;
+
+        appendToIgConsole(ig, '> jekyll build --source "' + sourcePath + '" --destination "' + outputPath + '"');
+
+        const jekyll = spawn('jekyll', ['build', '--source', sourcePath, '--destination', outputPath], {
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let hasOutput = false;
+        let wasTerminated = false;
+        const startTime = Date.now();
+
+        // Create the process control object
+        const processControl = {
+            kill: function() {
+                wasTerminated = true;
+                try {
+                    jekyll.kill('SIGTERM');
+                    setTimeout(function() {
+                        if (!jekyll.killed) {
+                            jekyll.kill('SIGKILL');
+                        }
+                    }, 5000);
+                } catch (error) {
+                    appendToIgConsole(ig, 'Error terminating Jekyll: ' + error.message);
+                }
+            },
+            pid: jekyll.pid
+        };
+
+        jekyll.stdout.on('data', function(data) {
+            hasOutput = true;
+            const text = data.toString();
+            const lines = text.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    const cleanLine = stripAnsiCodes(lines[i].trim());
+                    appendToIgConsole(ig, cleanLine);
+                }
+            }
+        });
+
+        jekyll.stderr.on('data', function(data) {
+            hasOutput = true;
+            const text = data.toString();
+            const lines = text.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    const cleanLine = stripAnsiCodes(lines[i].trim());
+                    appendToIgConsole(ig, cleanLine);
+                }
+            }
+        });
+
+        jekyll.on('close', function(code, signal) {
+            const endTime = Date.now();
+            const duration = Math.round((endTime - startTime) / 1000);
+            const timeString = Math.floor(duration / 60) + ':' + (duration % 60).toString().padStart(2, '0');
+
+            buildProcesses.delete(selectedIgIndex);
+
+            if (wasTerminated) {
+                ig.buildStatus = 'Stopped';
+                appendToIgConsole(ig, '⏹ Jekyll build terminated by user after ' + timeString);
+            } else if (code === 0) {
+                ig.buildStatus = 'Success';
+                appendToIgConsole(ig, '✓ Jekyll build completed successfully');
+                appendToIgConsole(ig, 'Build time: ' + timeString);
+            } else {
+                ig.buildStatus = 'Error';
+                const exitReason = signal ? ` (signal: ${signal})` : ` (exit code: ${code})`;
+                appendToIgConsole(ig, '✗ Jekyll build failed' + exitReason);
+                appendToIgConsole(ig, 'Build time: ' + timeString);
+            }
+
+            updateIgList();
+            updateButtonStates();
+            saveIgList();
+        });
+
+        jekyll.on('error', function(error) {
+            buildProcesses.delete(selectedIgIndex);
+            ig.buildStatus = 'Error';
+
+            if (error.code === 'ENOENT') {
+                appendToIgConsole(ig, '✗ Jekyll not found. Please install Jekyll and ensure it\'s in your PATH.');
+                appendToIgConsole(ig, 'Install with: gem install jekyll bundler');
+            } else {
+                appendToIgConsole(ig, '✗ Jekyll error: ' + error.message);
+            }
+
+            updateIgList();
+            updateButtonStates();
+            reject(error);
+        });
+
+        resolve(processControl);
+    });
+}
+
+// Open settings file implementation
+async function openSettingsFile() {
+    try {
+        const settingsPath = await ipcRenderer.invoke('get-fhir-settings-path');
+
+        // Check if file exists, create if it doesn't
+        if (!fs.existsSync(settingsPath)) {
+            const settingsDir = path.dirname(settingsPath);
+            if (!fs.existsSync(settingsDir)) {
+                fs.mkdirSync(settingsDir, { recursive: true });
+            }
+
+            // Create default settings file
+            const defaultSettings = {
+                "resourceType": "Parameters",
+                "parameter": [
+                    {
+                        "name": "system-level",
+                        "valueBoolean": true
+                    }
+                ]
+            };
+
+            fs.writeFileSync(settingsPath, JSON.stringify(defaultSettings, null, 2));
+        }
+
+        await ipcRenderer.invoke('open-external', 'file://' + settingsPath);
+
+    } catch (error) {
+        appendToBuildOutput('✗ Failed to open settings file: ' + error.message);
+    }
+}
+
+function closeContextMenus() {
+    const copyMenu = document.getElementById('copy-menu');
+    const toolsMenu = document.getElementById('tools-menu');
+    if (copyMenu) copyMenu.style.display = 'none';
+    if (toolsMenu) toolsMenu.style.display = 'none';
+}
+
+function toggleOptionsPanel() {
+    optionsPanelVisible = !optionsPanelVisible;
+    
+    if (optionsPanelVisible) {
+        optionsPanel.classList.add('visible');
+        toggleButton.classList.add('expanded');
+    } else {
+        optionsPanel.classList.remove('visible');
+        toggleButton.classList.remove('expanded');
+    }
+}
+
+function saveIgList() {
+    try {
+        const igListToSave = [];
+        for (let i = 0; i < igList.length; i++) {
+            const ig = igList[i];
+            const savedIg = {
+                name: ig.name,
+                version: ig.version,
+                folder: ig.folder,
+                buildStatus: ig.buildStatus,
+                buildTime: ig.buildTime,
+                builtSize: ig.builtSize
+                // Don't save console data
+            };
+            igListToSave.push(savedIg);
+        }
+        localStorage.setItem('igList', JSON.stringify(igListToSave));
+    } catch (error) {
+        console.log('Could not save IG list:', error);
+    }
+}
+
+function loadIgList() {
+    try {
+        const saved = localStorage.getItem('igList');
+        if (saved) {
+            igList = JSON.parse(saved);
+            for (let i = 0; i < igList.length; i++) {
+                const ig = igList[i];
+                initializeIgConsole(ig);
+            }
+        }
+    } catch (error) {
+        console.log('Could not load IG list:', error);
+        igList = [];
+    }
+}
+
+// Publisher version management
+async function loadPublisherVersions() {
+
+    try {
+
+        // Create abort controller with timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(function() {
+            controller.abort();
+        }, 8000); // 8 second timeout
+        
+        const response = await fetch('https://api.github.com/repos/HL7/fhir-ig-publisher/releases', {
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'IG-Publisher-Manager'
+            },
+            signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+            throw new Error('GitHub API responded with ' + response.status + ': ' + response.statusText);
+        }
+        
+        const releases = await response.json();
+        const versions = [];
+        
+        // Process each release
+        for (let i = 0; i < releases.length; i++) {
+            const release = releases[i];
+            if (release.tag_name && release.assets && release.assets.length > 0) {
+                const tagName = release.tag_name;
+                const downloadUrl = release.assets[0].browser_download_url;
+                versions.push({
+                    version: tagName,
+                    url: downloadUrl
+                });
+            }
+        }
+
+        if (versions.length > 0) {
+            updatePublisherVersionDropdown(versions);
+            savePublisherVersions(versions);
+        } else {
+            throw new Error('No valid releases found');
+        }
+        
+    } catch (error) {
+        console.log('Error in loadPublisherVersions:', error);
+        let errorMessage = 'Unknown error';
+        
+        if (error.name === 'AbortError') {
+            errorMessage = 'Request timed out after 8 seconds';
+        } else if (error.message) {
+            errorMessage = error.message;
+        }
+        
+
+        // Try to load from saved versions
+        const savedVersions = loadSavedPublisherVersions();
+        if (savedVersions && savedVersions.length > 0) {
+            updatePublisherVersionDropdown(savedVersions);
+        } else {
+            appendToBuildOutput('No cached versions available, using default list');
+        }
+    }
+}
+
+function updatePublisherVersionDropdown(versions) {
+    try {
+        const dropdown = document.getElementById('ig-publisher-version');
+        if (!dropdown) {
+            return;
+        }
+        
+        // Clear existing options except "Latest"
+        dropdown.innerHTML = '<option value="latest">Latest</option>';
+        
+        // Add version options
+        for (let i = 0; i < versions.length; i++) {
+            const versionInfo = versions[i];
+            const option = document.createElement('option');
+            option.value = versionInfo.version;
+            option.textContent = versionInfo.version;
+            option.dataset.downloadUrl = versionInfo.url;
+            dropdown.appendChild(option);
+        }
+        
+    } catch (error) {
+        console.log('Error updating publisher dropdown:', error);
+    }
+}
+
+function savePublisherVersions(versions) {
+    try {
+        localStorage.setItem('igPublisherVersions', JSON.stringify(versions));
+    } catch (error) {
+        console.log('Failed to save publisher versions:', error);
+    }
+}
+
+function loadSavedPublisherVersions() {
+    try {
+        const saved = localStorage.getItem('igPublisherVersions');
+        if (saved) {
+            return JSON.parse(saved);
+        }
+    } catch (error) {
+        console.log('Failed to load saved publisher versions:', error);
+    }
+    return null;
+}
+
+
+// GitHub dialog and functionality
+async function addFromGitHub() {
+    // Try to auto-populate from clipboard when dialog opens
+    let clipboardData = null;
+    try {
+        const clipboardText = await navigator.clipboard.readText();
+        clipboardData = parseGitHubUrl(clipboardText, false); // false = don't show errors
+    } catch (error) {
+        // Clipboard access failed or parsing failed - that's okay
+    }
+
+    const result = await showGitHubDialog(clipboardData);
+
+    if (result && result !== 'cancel') {
+        await cloneGitHubRepository(result);
+    }
+}
+
+function showGitHubDialog(initialData) {
+    return new Promise(function(resolve) {
+        // Get saved base folder
+        const savedBaseFolder = localStorage.getItem('githubBaseFolder') || '';
+
+        const dialog = document.createElement('div');
+        dialog.innerHTML =
+          '<div class="dialog-overlay">' +
+          '<div class="dialog">' +
+          '<div class="dialog-header">Add Implementation Guide from GitHub</div>' +
+          '<div class="dialog-content">' +
+          '<div class="paste-section">' +
+          '<button id="paste-btn" class="btn-paste">Paste from Clipboard</button>' +
+          '<div id="paste-error" class="paste-error" style="display: none;"></div>' +
+          '</div>' +
+          '<div class="form-group">' +
+          '<label for="base-folder">Base Folder</label>' +
+          '<div style="display: flex; gap: 8px;">' +
+          '<input type="text" id="base-folder" value="' + savedBaseFolder + '" placeholder="Choose base folder for clones">' +
+          '<button type="button" id="browse-base-folder">Browse...</button>' +
+          '</div>' +
+          '</div>' +
+          '<div class="form-group">' +
+          '<label for="git-org">Organization</label>' +
+          '<input type="text" id="git-org" value="' + (initialData?.org || '') + '" placeholder="e.g., HL7">' +
+          '</div>' +
+          '<div class="form-group">' +
+          '<label for="git-repo">Repository Name</label>' +
+          '<input type="text" id="git-repo" value="' + (initialData?.repo || '') + '" placeholder="e.g., fhir-us-core">' +
+          '</div>' +
+          '<div class="form-group">' +
+          '<label for="git-branch">Branch</label>' +
+          '<input type="text" id="git-branch" value="' + (initialData?.branch || 'main') + '" placeholder="main">' +
+          '</div>' +
+          '</div>' +
+          '<div class="dialog-buttons">' +
+          '<button onclick="resolveGitHubDialog(\'cancel\')" class="btn-cancel">Cancel</button>' +
+          '<button onclick="resolveGitHubDialog(\'ok\')" class="btn-ok">Clone Repository</button>' +
+          '</div>' +
+          '</div>' +
+          '</div>';
+
+        // Add resolver function to window
+        window.resolveGitHubDialog = function(action) {
+            if (action === 'ok') {
+                const baseFolder = document.getElementById('base-folder').value.trim();
+                const org = document.getElementById('git-org').value.trim();
+                const repo = document.getElementById('git-repo').value.trim();
+                const branch = document.getElementById('git-branch').value.trim();
+
+                if (!baseFolder || !org || !repo || !branch) {
+                    alert('Please fill in all fields');
+                    return;
+                }
+
+                // Save base folder for next time
+                localStorage.setItem('githubBaseFolder', baseFolder);
+
+                document.body.removeChild(dialog);
+                delete window.resolveGitHubDialog;
+                resolve({
+                    baseFolder: baseFolder,
+                    org: org,
+                    repo: repo,
+                    branch: branch
+                });
+            } else {
+                document.body.removeChild(dialog);
+                delete window.resolveGitHubDialog;
+                resolve('cancel');
+            }
+        };
+
+        document.body.appendChild(dialog);
+
+        // Set up event listeners for the dialog
+        setupGitHubDialogListeners(dialog);
+    });
+}
+
+function setupGitHubDialogListeners(dialog) {
+    // Paste button
+    const pasteBtn = dialog.querySelector('#paste-btn');
+    const pasteError = dialog.querySelector('#paste-error');
+
+    pasteBtn.addEventListener('click', async function() {
+        try {
+            const clipboardText = await navigator.clipboard.readText();
+            const parsed = parseGitHubUrl(clipboardText, true); // true = show errors
+
+            if (parsed) {
+                dialog.querySelector('#git-org').value = parsed.org;
+                dialog.querySelector('#git-repo').value = parsed.repo;
+                dialog.querySelector('#git-branch').value = parsed.branch;
+
+                // Try to get the actual default branch from GitHub
+                try {
+                    const defaultBranch = await getGitHubDefaultBranch(parsed.org, parsed.repo);
+                    if (defaultBranch && parsed.branch === 'main') { // Only update if we were guessing
+                        dialog.querySelector('#git-branch').value = defaultBranch;
+                    }
+                } catch (error) {
+                    // Ignore - just use what we parsed
+                }
+
+                pasteError.style.display = 'none';
+            }
+        } catch (error) {
+            pasteError.textContent = 'Paste failed: ' + error.message;
+            pasteError.style.display = 'block';
+        }
+    });
+
+    // Browse base folder button
+    const browseBtn = dialog.querySelector('#browse-base-folder');
+    browseBtn.addEventListener('click', async function() {
+        try {
+            const result = await ipcRenderer.invoke('select-folder');
+            if (!result.canceled && result.filePaths.length > 0) {
+                dialog.querySelector('#base-folder').value = result.filePaths[0];
+            }
+        } catch (error) {
+            console.log('Error selecting folder:', error);
+        }
+    });
+}
+
+// Convert the Pascal parsing logic to JavaScript
+function parseGitHubUrl(url, showError) {
+    try {
+        if (!url || typeof url !== 'string') {
+            throw new Error('Not a valid URL');
+        }
+
+        url = url.trim();
+
+        // Check if it's an absolute URL
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+            throw new Error('Not a URL: ' + url);
+        }
+
+        let branch = 'main'; // Default to 'main' instead of 'master'
+        let org = '';
+        let repo = '';
+
+        const parts = url.split('/');
+
+        // Parse build.fhir.org URLs: https://build.fhir.org/ig/org/repo/branches/branch
+        if (parts.length > 5 && (url.startsWith('https://build.fhir.org/ig') || url.startsWith('http://build.fhir.org/ig'))) {
+            org = parts[4];
+            repo = parts[5];
+
+            if (parts.length >= 8) {
+                if (parts[6] !== 'branches') {
+                    throw new Error('Unable to understand IG location: ' + url);
+                } else {
+                    branch = parts[7];
+                }
+            }
+        }
+        // Parse GitHub URLs: https://github.com/org/repo/tree/branch or https://github.com/org/repo/blob/branch
+        else if (parts.length > 4 && (url.startsWith('https://github.com/') || url.startsWith('http://github.com/'))) {
+            org = parts[3];
+            repo = parts[4];
+
+            if (parts.length > 6) {
+                if (parts[5] === 'tree' || parts[5] === 'blob') {
+                    branch = parts[6];
+                } else {
+                    throw new Error('Unable to understand IG location: ' + url);
+                }
+            }
+        } else {
+            throw new Error('URL must be from github.com or build.fhir.org');
+        }
+
+        if (!org || !repo) {
+            throw new Error('Unable to understand IG location: ' + url);
+        }
+
+        return {
+            org: org,
+            repo: repo,
+            branch: branch
+        };
+
+    } catch (error) {
+        if (showError) {
+            const pasteError = document.getElementById('paste-error');
+            if (pasteError) {
+                pasteError.textContent = 'URL Error: ' + error.message;
+                pasteError.style.display = 'block';
+            }
+        }
+        return null;
+    }
+}
+
+// Get the default branch from GitHub API
+async function getGitHubDefaultBranch(org, repo) {
+    try {
+        const response = await fetch(`https://api.github.com/repos/${org}/${repo}`, {
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'IG-Publisher-Manager'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error('GitHub API request failed: ' + response.status);
+        }
+
+        const repoInfo = await response.json();
+        return repoInfo.default_branch;
+
+    } catch (error) {
+        console.log('Failed to get default branch:', error);
+        throw error;
+    }
+}
+
+// Clone the repository
+async function cloneGitHubRepository(config) {
+    const { baseFolder, org, repo, branch } = config;
+
+    // Create target folder name: org-repo-branch
+    const folderName = `${org}-${repo}-${branch}`;
+    const targetPath = path.join(baseFolder, folderName);
+
+    // Check if folder already exists
+    if (fs.existsSync(targetPath)) {
+        const overwrite = confirm(`Folder "${folderName}" already exists. Overwrite?`);
+        if (!overwrite) {
+            appendToBuildOutput('Clone cancelled - folder already exists');
+            return;
+        }
+
+        try {
+            await ipcRenderer.invoke('delete-folder', targetPath);
+        } catch (error) {
+            appendToBuildOutput('Failed to delete existing folder: ' + error.message);
+            return;
+        }
+    }
+
+    appendToBuildOutput(`Cloning ${org}/${repo} (${branch}) to ${targetPath}...`);
+
+    try {
+        // Create a temporary IG entry for console output
+        const tempIg = {
+            name: `${org}/${repo}`,
+            folder: targetPath,
+            console: ''
+        };
+
+        resetIgConsole(tempIg, 'Git Clone');
+
+        const gitUrl = `https://github.com/${org}/${repo}.git`;
+        appendToIgConsole(tempIg, `Cloning from: ${gitUrl}`);
+        appendToIgConsole(tempIg, `Branch: ${branch}`);
+        appendToIgConsole(tempIg, `Target: ${targetPath}`);
+
+        await runGitClone(tempIg, gitUrl, targetPath, branch);
+
+        // Add the cloned repository to our IG list
+        await addIgFromFolder(targetPath);
+
+        appendToIgConsole(tempIg, '✓ Repository cloned and added successfully');
+
+    } catch (error) {
+        appendToBuildOutput('✗ Clone failed: ' + error.message);
+    }
+}
+
+// Run git clone command
+function runGitClone(ig, gitUrl, targetPath, branch) {
+    return new Promise(function(resolve, reject) {
+        const spawn = require('child_process').spawn;
+
+        const args = ['clone', '--branch', branch, '--single-branch', gitUrl, targetPath];
+        appendToIgConsole(ig, '> git ' + args.join(' '));
+
+        const git = spawn('git', args, {
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let hasOutput = false;
+
+        git.stdout.on('data', function(data) {
+            hasOutput = true;
+            const text = data.toString();
+            const lines = text.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    const cleanLine = stripAnsiCodes(lines[i].trim());
+                    appendToIgConsole(ig, cleanLine);
+                }
+            }
+        });
+
+        git.stderr.on('data', function(data) {
+            hasOutput = true;
+            const text = data.toString();
+            const lines = text.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    const cleanLine = stripAnsiCodes(lines[i].trim());
+                    appendToIgConsole(ig, cleanLine);
+                }
+            }
+        });
+
+        git.on('close', function(code) {
+            if (code === 0) {
+                if (!hasOutput) {
+                    appendToIgConsole(ig, 'Clone completed (no output)');
+                }
+                resolve();
+            } else {
+                const errorMsg = 'Git clone failed with exit code ' + code;
+                appendToIgConsole(ig, errorMsg);
+                reject(new Error(errorMsg));
+            }
+        });
+
+        git.on('error', function(error) {
+            let message = 'Git clone error: ' + error.message;
+            if (error.code === 'ENOENT') {
+                message = 'Git not found. Please install Git and ensure it\'s in your PATH.';
+            }
+            appendToIgConsole(ig, message);
+            reject(new Error(message));
+        });
+    });
+}
+
+function setupResizer() {
+    const resizer = document.getElementById('resizer');
+    const igListContainer = document.querySelector('.ig-list-container');
+    const buildOutputContainer = document.querySelector('.build-output-container');
+    const mainContent = document.querySelector('.main-content');
+
+    if (!resizer || !igListContainer || !buildOutputContainer || !mainContent) {
+        console.log('Resizer elements not found');
+        return;
+    }
+
+    let isResizing = false;
+    let startY = 0;
+    let startIgHeight = 0;
+    let startOutputHeight = 0;
+
+    resizer.addEventListener('mousedown', function(e) {
+        isResizing = true;
+        startY = e.clientY;
+
+        // Get current heights
+        const igRect = igListContainer.getBoundingClientRect();
+        const outputRect = buildOutputContainer.getBoundingClientRect();
+        startIgHeight = igRect.height;
+        startOutputHeight = outputRect.height;
+
+        // Add visual feedback
+        resizer.style.background = '#007acc';
+        document.body.style.cursor = 'row-resize';
+        document.body.style.userSelect = 'none';
+
+        // Prevent text selection during drag
+        e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', function(e) {
+        if (!isResizing) return;
+
+        const deltaY = e.clientY - startY;
+        const mainContentRect = mainContent.getBoundingClientRect();
+        const resizerHeight = 4; // Height of the resizer itself
+
+        // Calculate new heights
+        let newIgHeight = startIgHeight + deltaY;
+        let newOutputHeight = startOutputHeight - deltaY;
+
+        // Set minimum heights
+        const minHeight = 100;
+        const maxIgHeight = mainContentRect.height - minHeight - resizerHeight;
+        const maxOutputHeight = mainContentRect.height - minHeight - resizerHeight;
+
+        // Constrain the heights
+        newIgHeight = Math.max(minHeight, Math.min(newIgHeight, maxIgHeight));
+        newOutputHeight = Math.max(minHeight, Math.min(newOutputHeight, maxOutputHeight));
+
+        // Apply the new heights
+        igListContainer.style.height = newIgHeight + 'px';
+        buildOutputContainer.style.height = newOutputHeight + 'px';
+
+        // Store the heights for persistence
+        localStorage.setItem('igListHeight', newIgHeight);
+        localStorage.setItem('buildOutputHeight', newOutputHeight);
+    });
+
+    document.addEventListener('mouseup', function() {
+        if (isResizing) {
+            isResizing = false;
+
+            // Remove visual feedback
+            resizer.style.background = '#ddd';
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        }
+    });
+
+    // Handle cursor change on hover
+    resizer.addEventListener('mouseenter', function() {
+        if (!isResizing) {
+            resizer.style.background = '#007acc';
+        }
+    });
+
+    resizer.addEventListener('mouseleave', function() {
+        if (!isResizing) {
+            resizer.style.background = '#ddd';
+        }
+    });
+}
+
+// Function to restore saved heights
+function restorePanelHeights() {
+    const igListContainer = document.querySelector('.ig-list-container');
+    const buildOutputContainer = document.querySelector('.build-output-container');
+
+    try {
+        const savedIgHeight = localStorage.getItem('igListHeight');
+        const savedOutputHeight = localStorage.getItem('buildOutputHeight');
+
+        if (savedIgHeight && savedOutputHeight) {
+            igListContainer.style.height = savedIgHeight + 'px';
+            buildOutputContainer.style.height = savedOutputHeight + 'px';
+        }
+    } catch (error) {
+        console.log('Could not restore panel heights:', error);
+    }
+}
+
+
+function showIgContextMenu(event) {
+    const ig = getSelectedIg();
+    if (!ig) return;
+
+    const menu = document.getElementById('ig-context-menu');
+
+    // Update menu item states based on current conditions
+    updateContextMenuStates(menu, ig);
+
+    // Position the menu
+    menu.style.display = 'block';
+    menu.style.left = event.pageX + 'px';
+    menu.style.top = event.pageY + 'px';
+
+    // Adjust position if menu would go off screen
+    const rect = menu.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    if (rect.right > viewportWidth) {
+        menu.style.left = (viewportWidth - rect.width - 5) + 'px';
+    }
+
+    if (rect.bottom > viewportHeight) {
+        menu.style.top = (viewportHeight - rect.height - 5) + 'px';
+    }
+
+    event.stopPropagation();
+}
+
+function updateContextMenuStates(menu, ig) {
+    const isBuilding = buildProcesses.has(selectedIgIndex);
+    const isGitRepo = checkIfGitRepo(ig.folder);
+    const hasIgOutput = checkFileExists(ig.folder, 'output/index.html');
+    const hasQaOutput = checkFileExists(ig.folder, 'output/qa.html');
+
+    // Get all menu items
+    const menuItems = menu.querySelectorAll('.context-menu-item[data-action]');
+
+    menuItems.forEach(function(item) {
+        const action = item.dataset.action;
+        let enabled = true;
+
+        switch (action) {
+            case 'build':
+                enabled = !isBuilding;
+                break;
+            case 'stop':
+                enabled = isBuilding;
+                break;
+            case 'open-ig':
+                enabled = hasIgOutput;
+                break;
+            case 'open-qa':
+                enabled = hasQaOutput;
+                break;
+            case 'update':
+                enabled = isGitRepo;
+                break;
+          // copy-path, copy-github, open-folder, open-terminal are always enabled
+        }
+
+        if (enabled) {
+            item.classList.remove('disabled');
+        } else {
+            item.classList.add('disabled');
+        }
+    });
+}
+
+// Add this function to renderer.js
+
+function setupIgContextMenu() {
+    const menu = document.getElementById('ig-context-menu');
+    const menuItems = menu.querySelectorAll('.context-menu-item[data-action]');
+
+    menuItems.forEach(function(item) {
+        item.addEventListener('click', async function(e) {
+            if (item.classList.contains('disabled')) {
+                return;
+            }
+
+            const action = item.dataset.action;
+            const ig = getSelectedIg();
+            if (!ig) return;
+
+            closeContextMenus();
+
+            // Execute the action
+            switch (action) {
+                case 'build':
+                    buildIg();
+                    break;
+                case 'stop':
+                    stopBuild();
+                    break;
+                case 'open-ig':
+                    await openIG();
+                    break;
+                case 'open-qa':
+                    await openQA();
+                    break;
+                case 'copy-path':
+                    await handleCopyAction('copy-folder-path', ig.folder);
+                    break;
+                case 'copy-github':
+                    try {
+                        const gitUrl = await getGitRemoteUrl(ig.folder);
+                        await handleCopyAction('copy-github-url', gitUrl);
+                    } catch (error) {
+                        appendToBuildOutput('GitHub URL not available: ' + error.message);
+                    }
+                    break;
+                case 'update':
+                    await updateSource();
+                    break;
+                case 'open-folder':
+                    await openFolder(ig);
+                    break;
+                case 'open-terminal':
+                    await openTerminal(ig);
+                    break;
+            }
+        });
+    });
+}
+
+// Update the closeContextMenus function to include the new menu
+
+function closeContextMenus() {
+    const copyMenu = document.getElementById('copy-menu');
+    const toolsMenu = document.getElementById('tools-menu');
+    const igContextMenu = document.getElementById('ig-context-menu');
+    const buildOutputContextMenu = document.getElementById('build-output-context-menu');
+
+    if (copyMenu) copyMenu.style.display = 'none';
+    if (toolsMenu) toolsMenu.style.display = 'none';
+    if (igContextMenu) igContextMenu.style.display = 'none';
+    if (buildOutputContextMenu) buildOutputContextMenu.style.display = 'none';
+}
+
+// Update the setupContextMenus function to include the new menu
+
+function setupContextMenus() {
+    // Tools menu items
+    const toolsMenuItems = document.querySelectorAll('#tools-menu .context-menu-item');
+    for (let i = 0; i < toolsMenuItems.length; i++) {
+        toolsMenuItems[i].addEventListener('click', function(e) {
+            const action = e.target.dataset.action;
+            handleToolsAction(action);
+            closeContextMenus();
+        });
+    }
+
+    // IG context menu
+    setupIgContextMenu();
+    setupBuildOutputContextMenu();
+}
+
+function setupBuildOutput() {
+    const buildOutput = document.getElementById('build-output');
+    if (!buildOutput) return;
+
+    // Make it focusable for keyboard events
+    buildOutput.setAttribute('tabindex', '0');
+
+    // Add keyboard event listener for copy
+    buildOutput.addEventListener('keydown', function(e) {
+        // Ctrl+C (Windows/Linux) or Cmd+C (Mac)
+        if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+            copySelectedText();
+            e.preventDefault(); // Prevent default browser copy behavior
+        }
+
+        // Ctrl+A (Windows/Linux) or Cmd+A (Mac) - Select all
+        if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+            selectAllLogText();
+            e.preventDefault();
+        }
+    });
+
+    // Add context menu support
+    buildOutput.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+        showBuildOutputContextMenu(e);
+    });
+
+    // Focus when clicked to enable keyboard shortcuts
+    buildOutput.addEventListener('click', function() {
+        buildOutput.focus();
+    });
+}
+
+// Copy currently selected text
+function copySelectedText() {
+    try {
+        const selection = window.getSelection();
+        const selectedText = selection.toString();
+
+        if (selectedText) {
+            navigator.clipboard.writeText(selectedText).then(function() {
+                // Visual feedback - briefly highlight the build output
+                const buildOutput = document.getElementById('build-output');
+                buildOutput.style.backgroundColor = '#e3f2fd';
+                setTimeout(function() {
+                    buildOutput.style.backgroundColor = '#fafafa';
+                }, 200);
+
+                console.log('Copied selected text to clipboard');
+            }).catch(function(err) {
+                console.log('Failed to copy selected text:', err);
+                // Fallback - try using document.execCommand
+                try {
+                    document.execCommand('copy');
+                } catch (fallbackErr) {
+                    console.log('Fallback copy also failed:', fallbackErr);
+                }
+            });
+        } else {
+            // No text selected, copy all log content
+            copyAllLogText();
+        }
+    } catch (error) {
+        console.log('Error copying text:', error);
+    }
+}
+
+// Select all text in the log
+function selectAllLogText() {
+    const buildOutput = document.getElementById('build-output');
+    if (!buildOutput) return;
+
+    const range = document.createRange();
+    range.selectNodeContents(buildOutput);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+}
+
+// Copy all log text
+function copyAllLogText() {
+    const ig = getSelectedIg();
+    if (!ig) return;
+
+    initializeIgConsole(ig);
+    const logText = ig.console || 'No log content';
+
+    navigator.clipboard.writeText(logText).then(function() {
+        const buildOutput = document.getElementById('build-output');
+        buildOutput.style.backgroundColor = '#e3f2fd';
+        setTimeout(function() {
+            buildOutput.style.backgroundColor = '#fafafa';
+        }, 200);
+
+        console.log('Copied all log text to clipboard');
+    }).catch(function(err) {
+        console.log('Failed to copy all log text:', err);
+    });
+}
+
+// Clear the current IG's log
+function clearCurrentLog() {
+    const ig = getSelectedIg();
+    if (!ig) return;
+
+    initializeIgConsole(ig);
+    ig.console = '';
+    updateBuildOutputDisplay();
+
+}
+
+// Show build output context menu
+function showBuildOutputContextMenu(event) {
+    const menu = document.getElementById('build-output-context-menu');
+
+    // Update menu item states
+    updateBuildOutputContextMenuStates(menu);
+
+    // Position the menu
+    menu.style.display = 'block';
+    menu.style.left = event.pageX + 'px';
+    menu.style.top = event.pageY + 'px';
+
+    // Adjust position if menu would go off screen
+    const rect = menu.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    if (rect.right > viewportWidth) {
+        menu.style.left = (viewportWidth - rect.width - 5) + 'px';
+    }
+
+    if (rect.bottom > viewportHeight) {
+        menu.style.top = (viewportHeight - rect.height - 5) + 'px';
+    }
+
+    event.stopPropagation();
+}
+
+function updateBuildOutputContextMenuStates(menu) {
+    const selection = window.getSelection();
+    const hasSelection = selection.toString().length > 0;
+    const ig = getSelectedIg();
+    const hasLogContent = ig && ig.console && ig.console.length > 0;
+
+    const menuItems = menu.querySelectorAll('.context-menu-item[data-action]');
+
+    menuItems.forEach(function(item) {
+        const action = item.dataset.action;
+        let enabled = true;
+
+        switch (action) {
+            case 'copy-selected':
+                enabled = hasSelection;
+                break;
+            case 'copy-all':
+                enabled = hasLogContent;
+                break;
+            case 'clear-log':
+                enabled = hasLogContent;
+                break;
+        }
+
+        if (enabled) {
+            item.classList.remove('disabled');
+        } else {
+            item.classList.add('disabled');
+        }
+    });
+}
+
+// Setup build output context menu
+function setupBuildOutputContextMenu() {
+    const menu = document.getElementById('build-output-context-menu');
+    const menuItems = menu.querySelectorAll('.context-menu-item[data-action]');
+
+    menuItems.forEach(function(item) {
+        item.addEventListener('click', function(e) {
+            if (item.classList.contains('disabled')) {
+                return;
+            }
+
+            const action = item.dataset.action;
+            closeContextMenus();
+
+            switch (action) {
+                case 'copy-selected':
+                    copySelectedText();
+                    break;
+                case 'copy-all':
+                    copyAllLogText();
+                    break;
+                case 'clear-log':
+                    clearCurrentLog();
+                    break;
+            }
+        });
+    });
+}
