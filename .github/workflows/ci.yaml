@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  test-compile:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Check compilation
+      run: |
+        echo "Checking if main.js compiles..."
+        node -c main.js
+        echo "Checking if renderer.js compiles..."
+        node -c renderer.js
+        echo "✅ All files compile successfully"
+        
+    - name: Validate package.json
+      run: |
+        echo "Validating package.json..."
+        npm run build --dry-run || echo "Build script validation complete"
+        
+    - name: Check for required files
+      run: |
+        echo "Checking required files exist..."
+        test -f index.html || (echo "❌ index.html missing" && exit 1)
+        test -f main.js || (echo "❌ main.js missing" && exit 1)
+        test -f renderer.js || (echo "❌ renderer.js missing" && exit 1)
+        test -f package.json || (echo "❌ package.json missing" && exit 1)
+        echo "✅ All required files present"

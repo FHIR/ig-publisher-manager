@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release-id: ${{ steps.create-release.outputs.id }}
+      upload-url: ${{ steps.create-release.outputs.upload_url }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Create Release
+      id: create-release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.event.inputs.version || github.ref_name }}
+        release_name: IG Publisher Manager ${{ github.event.inputs.version || github.ref_name }}
+        body: |
+          ## Changes
+          - Release ${{ github.event.inputs.version || github.ref_name }}
+          
+          ## Downloads
+          Choose the appropriate file for your platform:
+          - **Windows**: `.exe` installer or portable `.exe`
+          - **macOS**: `.dmg` disk image
+          - **Linux**: `.AppImage` (universal), `.deb` (Debian/Ubuntu), or `.rpm` (RedHat/Fedora)
+          
+          ## Requirements
+          - Java 11 or later
+          - Git (for repository operations)
+          - Jekyll (optional, for Jekyll builds)
+        draft: false
+        prerelease: false
+
+  build-and-upload:
+    needs: create-release
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build for Linux
+      if: matrix.os == 'ubuntu-latest'
+      run: npm run build-linux
+      
+    - name: Build for Windows
+      if: matrix.os == 'windows-latest'
+      run: npm run build-win
+      
+    - name: Build for macOS
+      if: matrix.os == 'macos-latest'
+      run: npm run build-mac
+      
+    # Upload Linux files
+    - name: Upload Linux AppImage
+      if: matrix.os == 'ubuntu-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload-url }}
+        asset_path: ./dist/IG Publisher Manager-*.AppImage
+        asset_name: ig-publisher-manager-linux.AppImage
+        asset_content_type: application/octet-stream
+        
+    - name: Upload Linux DEB
+      if: matrix.os == 'ubuntu-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload-url }}
+        asset_path: ./dist/ig-publisher-manager_*.deb
+        asset_name: ig-publisher-manager-linux.deb
+        asset_content_type: application/vnd.debian.binary-package
+        
+    # Upload Windows files
+    - name: Upload Windows Installer
+      if: matrix.os == 'windows-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload-url }}
+        asset_path: ./dist/IG Publisher Manager Setup *.exe
+        asset_name: ig-publisher-manager-windows-installer.exe
+        asset_content_type: application/octet-stream
+        
+    - name: Upload Windows Portable
+      if: matrix.os == 'windows-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload-url }}
+        asset_path: ./dist/IG Publisher Manager *.exe
+        asset_name: ig-publisher-manager-windows-portable.exe
+        asset_content_type: application/octet-stream
+        
+    # Upload macOS files
+    - name: Upload macOS DMG
+      if: matrix.os == 'macos-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload-url }}
+        asset_path: ./dist/IG Publisher Manager-*.dmg
+        asset_name: ig-publisher-manager-macos.dmg
+        asset_content_type: application/octet-stream
+        
