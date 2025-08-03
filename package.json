@@ -22,8 +22,9 @@
     "electron",
     "desktop"
   ],
-  "author": "Your Name",
-  "license": "MIT",
+  "author": "Grahame Grieve",
+  "email" : "grahameg@gmail.com",
+  "license": "BSD-3",
   "devDependencies": {
     "electron": "^27.0.0",
     "electron-builder": "^24.6.4"
