@@ -84,33 +84,163 @@ async function getJarPath(version) {
 
 async function ensureJarExists(version, downloadUrl, ig) {
     const jarPath = await getJarPath(version);
-    
+
     if (fs.existsSync(jarPath)) {
         appendToIgConsole(ig, 'Using existing JAR: ' + jarPath);
         return jarPath;
     }
-    
+
     appendToIgConsole(ig, 'Downloading IG Publisher version ' + version + '...');
-    appendToIgConsole(ig, 'Download URL: ' + downloadUrl);
-    
+
     try {
-        const response = await fetch(downloadUrl);
-        if (!response.ok) {
-            throw new Error('Download failed: ' + response.status + ' ' + response.statusText);
-        }
-        
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        
-        fs.writeFileSync(jarPath, buffer);
-        appendToIgConsole(ig, 'Downloaded JAR to: ' + jarPath);
-        appendToIgConsole(ig, 'JAR size: ' + (buffer.length / 1024 / 1024).toFixed(1) + ' MB');
-        
+        // Try multiple download methods for Windows compatibility
+        await downloadJarWithFallbacks(downloadUrl, jarPath, ig);
+
+        const stats = fs.statSync(jarPath);
+        appendToIgConsole(ig, 'Downloaded JAR: ' + (stats.size / 1024 / 1024).toFixed(1) + ' MB');
+
         return jarPath;
     } catch (error) {
         appendToIgConsole(ig, 'Failed to download JAR: ' + error.message);
         throw error;
     }
+}
+
+async function downloadJarWithFallbacks(downloadUrl, jarPath, ig) {
+    const downloadMethods = [
+        () => downloadWithFetch(downloadUrl, jarPath, ig),
+        () => downloadWithNode(downloadUrl, jarPath, ig),
+        () => downloadFromDirectUrl(downloadUrl, jarPath, ig)
+    ];
+
+    let lastError;
+
+    for (let i = 0; i < downloadMethods.length; i++) {
+        try {
+            appendToIgConsole(ig, `Trying download method ${i + 1}...`);
+            await downloadMethods[i]();
+            return; // Success!
+        } catch (error) {
+            lastError = error;
+            appendToIgConsole(ig, `Method ${i + 1} failed: ${error.message}`);
+        }
+    }
+
+    throw new Error(`All download methods failed. Last error: ${lastError.message}`);
+}
+
+// Method 1: Standard fetch with HTTP/1.1 fallback
+async function downloadWithFetch(downloadUrl, jarPath, ig) {
+    appendToIgConsole(ig, 'Using fetch download method...');
+
+    const response = await fetch(downloadUrl, {
+        headers: {
+            'User-Agent': 'IG-Publisher-Manager',
+            'Accept': 'application/octet-stream',
+            'Connection': 'keep-alive',
+            // Force HTTP/1.1 to avoid HTTP/2 issues on Windows
+            'HTTP2-Settings': ''
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    fs.writeFileSync(jarPath, buffer);
+}
+
+// Method 2: Use Node.js https module directly
+async function downloadWithNode(downloadUrl, jarPath, ig) {
+    return new Promise((resolve, reject) => {
+        appendToIgConsole(ig, 'Using Node.js HTTPS download method...');
+
+        const https = require('https');
+        const url = require('url');
+        const fs = require('fs');
+
+        const parsedUrl = url.parse(downloadUrl);
+
+        const options = {
+            hostname: parsedUrl.hostname,
+            port: parsedUrl.port || 443,
+            path: parsedUrl.path,
+            method: 'GET',
+            headers: {
+                'User-Agent': 'IG-Publisher-Manager',
+                'Accept': 'application/octet-stream'
+            },
+            // Force HTTP/1.1
+            protocol: 'https:',
+            secureProtocol: 'TLSv1_2_method'
+        };
+
+        const req = https.request(options, (res) => {
+            if (res.statusCode === 302 || res.statusCode === 301) {
+                // Handle redirect
+                return downloadWithNode(res.headers.location, jarPath, ig)
+                  .then(resolve)
+                  .catch(reject);
+            }
+
+            if (res.statusCode !== 200) {
+                reject(new Error(`Download failed: ${res.statusCode} ${res.statusMessage}`));
+                return;
+            }
+
+            const fileStream = fs.createWriteStream(jarPath);
+            res.pipe(fileStream);
+
+            fileStream.on('finish', () => {
+                fileStream.close();
+                resolve();
+            });
+
+            fileStream.on('error', (err) => {
+                fs.unlink(jarPath, () => {}); // Delete partial file
+                reject(err);
+            });
+        });
+
+        req.on('error', (err) => {
+            reject(err);
+        });
+
+        req.setTimeout(30000, () => {
+            req.abort();
+            reject(new Error('Download timeout'));
+        });
+
+        req.end();
+    });
+}
+
+// Method 3: Try to get a simpler direct URL from GitHub
+async function downloadFromDirectUrl(originalUrl, jarPath, ig) {
+    appendToIgConsole(ig, 'Trying direct GitHub URL method...');
+
+    // If this is a GitHub release asset URL, try to get the direct download
+    if (originalUrl.includes('release-assets.githubusercontent.com')) {
+        // Extract the filename and try the direct API approach
+        const filenameMatch = originalUrl.match(/filename%3D([^&]+)/);
+        if (filenameMatch) {
+            const filename = decodeURIComponent(filenameMatch[1]);
+            appendToIgConsole(ig, `Detected filename: ${filename}`);
+
+            // For publisher.jar, try the known direct URL
+            if (filename === 'publisher.jar') {
+                const directUrl = 'https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar';
+                appendToIgConsole(ig, `Trying direct URL: ${directUrl}`);
+
+                return downloadWithNode(directUrl, jarPath, ig);
+            }
+        }
+    }
+
+    throw new Error('Could not determine direct download URL');
 }
 
 function buildIgPublisherCommand(ig, jarPath) {
@@ -1906,69 +2036,88 @@ function loadIgList() {
 
 // Publisher version management
 async function loadPublisherVersions() {
+    console.log('loadPublisherVersions function started');
+    appendToBuildOutput('Loading IG Publisher versions...');
 
     try {
-
         // Create abort controller with timeout
         const controller = new AbortController();
         const timeoutId = setTimeout(function() {
             controller.abort();
-        }, 8000); // 8 second timeout
-        
+        }, 10000); // 10 second timeout
+
         const response = await fetch('https://api.github.com/repos/HL7/fhir-ig-publisher/releases', {
             headers: {
-                'Accept': 'application/json',
+                'Accept': 'application/vnd.github.v3+json',
                 'User-Agent': 'IG-Publisher-Manager'
             },
             signal: controller.signal
         });
-        
+
         clearTimeout(timeoutId);
-        
+
         if (!response.ok) {
             throw new Error('GitHub API responded with ' + response.status + ': ' + response.statusText);
         }
-        
+
         const releases = await response.json();
         const versions = [];
-        
+
         // Process each release
         for (let i = 0; i < releases.length; i++) {
             const release = releases[i];
             if (release.tag_name && release.assets && release.assets.length > 0) {
-                const tagName = release.tag_name;
-                const downloadUrl = release.assets[0].browser_download_url;
-                versions.push({
-                    version: tagName,
-                    url: downloadUrl
-                });
+                // Look for publisher.jar specifically
+                const publisherAsset = release.assets.find(asset =>
+                  asset.name === 'publisher.jar' || asset.name.includes('publisher')
+                );
+
+                if (publisherAsset) {
+                    versions.push({
+                        version: release.tag_name,
+                        url: publisherAsset.browser_download_url,
+                        directUrl: `https://github.com/HL7/fhir-ig-publisher/releases/download/${release.tag_name}/publisher.jar`
+                    });
+                }
             }
         }
 
         if (versions.length > 0) {
             updatePublisherVersionDropdown(versions);
             savePublisherVersions(versions);
+            appendToBuildOutput('Loaded ' + versions.length + ' IG Publisher versions');
         } else {
             throw new Error('No valid releases found');
         }
-        
+
     } catch (error) {
         console.log('Error in loadPublisherVersions:', error);
         let errorMessage = 'Unknown error';
-        
+
         if (error.name === 'AbortError') {
-            errorMessage = 'Request timed out after 8 seconds';
+            errorMessage = 'Request timed out after 10 seconds';
         } else if (error.message) {
             errorMessage = error.message;
         }
-        
+
+        appendToBuildOutput('Failed to load publisher versions: ' + errorMessage);
 
         // Try to load from saved versions
         const savedVersions = loadSavedPublisherVersions();
         if (savedVersions && savedVersions.length > 0) {
             updatePublisherVersionDropdown(savedVersions);
+            appendToBuildOutput('Using ' + savedVersions.length + ' cached publisher versions');
         } else {
-            appendToBuildOutput('No cached versions available, using default list');
+            appendToBuildOutput('No cached versions available');
+            // Add fallback version
+            const fallbackVersions = [{
+                version: 'latest',
+                url: 'https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar',
+                directUrl: 'https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar'
+            }];
+            updatePublisherVersionDropdown(fallbackVersions);
+            savePublisherVersions(fallbackVersions);
+            appendToBuildOutput('Using fallback version configuration');
         }
     }
 }
