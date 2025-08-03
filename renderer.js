@@ -730,10 +730,29 @@ function updateIgList() {
         });
 
         const statusClass = getStatusClass(ig.buildStatus || 'Not Built');
-        
+
+        // Format git branch display
+        let gitBranchDisplay = '';
+        if (ig.gitBranch) {
+            gitBranchDisplay = ig.gitBranch;
+            // Add styling for common branches
+            if (ig.gitBranch === 'main' || ig.gitBranch === 'master') {
+                gitBranchDisplay = `<span style="color: #28a745; font-weight: 500;">${ig.gitBranch}</span>`;
+            } else if (ig.gitBranch === 'develop' || ig.gitBranch === 'dev') {
+                gitBranchDisplay = `<span style="color: #17a2b8; font-weight: 500;">${ig.gitBranch}</span>`;
+            } else if (ig.gitBranch === 'detached') {
+                gitBranchDisplay = `<span style="color: #ffc107; font-weight: 500;">detached HEAD</span>`;
+            } else {
+                gitBranchDisplay = `<span style="color: #6f42c1; font-weight: 500;">${ig.gitBranch}</span>`;
+            }
+        } else {
+            gitBranchDisplay = '<span style="color: #6c757d;">-</span>';
+        }
+
         row.innerHTML = 
             '<td>' + ig.name + '</td>' +
             '<td>' + ig.version + '</td>' +
+            '<td>' + gitBranchDisplay + '</td>' +
             '<td>' + ig.folder + '</td>' +
             '<td><span class="status-badge ' + statusClass + '">' + (ig.buildStatus || 'Not Built') + '</span></td>' +
             '<td>' + (ig.buildTime || '-') + '</td>' +
@@ -1007,6 +1026,7 @@ async function addIgFromFolder(folderPath) {
     try {
         let igName = path.basename(folderPath);
         let version = 'Unknown';
+        let gitBranch = await getCurrentGitBranch(folderPath);
 
         // Try to get proper name and version from IG resource
         try {
@@ -1032,6 +1052,7 @@ async function addIgFromFolder(folderPath) {
             name: igName,
             version: version,
             folder: folderPath,
+            gitBranch: gitBranch,
             buildStatus: 'Not Built',
             buildTime: '-',
             builtSize: '-',
@@ -2005,6 +2026,7 @@ function saveIgList() {
                 name: ig.name,
                 version: ig.version,
                 folder: ig.folder,
+                gitBranch: ig.gitBranch,
                 buildStatus: ig.buildStatus,
                 buildTime: ig.buildTime,
                 builtSize: ig.builtSize
@@ -2026,6 +2048,14 @@ function loadIgList() {
             for (let i = 0; i < igList.length; i++) {
                 const ig = igList[i];
                 initializeIgConsole(ig);
+
+                // Backwards compatibility - if gitBranch is not set, try to get it
+                if (ig.gitBranch === undefined) {
+                    getCurrentGitBranch(ig.folder).then(function(branch) {
+                        ig.gitBranch = branch;
+                        updateIgList(); // Refresh display
+                    });
+                }
             }
         }
     } catch (error) {
@@ -2988,4 +3018,134 @@ function setupBuildOutputContextMenu() {
             }
         });
     });
+}
+
+async function getCurrentGitBranch(folder) {
+    return new Promise(function(resolve, reject) {
+        if (!fs.existsSync(path.join(folder, '.git'))) {
+            resolve(null); // Not a git repository
+            return;
+        }
+
+        const spawn = require('child_process').spawn;
+        const git = spawn('git', ['branch', '--show-current'], {
+            cwd: folder,
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let output = '';
+
+        git.stdout.on('data', function(data) {
+            output += data.toString().trim();
+        });
+
+        git.on('close', function(code) {
+            if (code === 0 && output) {
+                resolve(output);
+            } else {
+                // Fallback: try to get branch from HEAD
+                const headPath = path.join(folder, '.git', 'HEAD');
+                try {
+                    if (fs.existsSync(headPath)) {
+                        const headContent = fs.readFileSync(headPath, 'utf8').trim();
+                        if (headContent.startsWith('ref: refs/heads/')) {
+                            const branchName = headContent.substring('ref: refs/heads/'.length);
+                            resolve(branchName);
+                        } else {
+                            resolve('detached'); // Detached HEAD state
+                        }
+                    } else {
+                        resolve(null);
+                    }
+                } catch (error) {
+                    resolve(null);
+                }
+            }
+        });
+
+        git.on('error', function(error) {
+            resolve(null); // Git not available or other error
+        });
+    });
+}
+
+// Function to check for changes in an IG
+async function checkIgForChanges(ig, index) {
+    try {
+        let hasChanges = false;
+
+        // Check for version changes by re-reading package info
+        try {
+            const packageInfo = await getPackageId(ig.folder);
+
+            // Check if version changed
+            if (packageInfo.version !== ig.version) {
+                console.log(`Version changed for ${ig.name}: ${ig.version} -> ${packageInfo.version}`);
+                ig.version = packageInfo.version;
+                hasChanges = true;
+            }
+
+            // Check if name/title changed
+            if (packageInfo.title !== ig.name) {
+                console.log(`Name changed for ${ig.name}: ${ig.name} -> ${packageInfo.title}`);
+                ig.name = packageInfo.title;
+                hasChanges = true;
+            }
+        } catch (error) {
+            // Couldn't read package info - that's okay, skip version check
+        }
+
+        // Check for git branch changes
+        const currentBranch = await getCurrentGitBranch(ig.folder);
+        if (currentBranch !== ig.gitBranch) {
+            console.log(`Branch changed for ${ig.name}: ${ig.gitBranch || 'none'} -> ${currentBranch || 'none'}`);
+            ig.gitBranch = currentBranch;
+            hasChanges = true;
+        }
+
+        return hasChanges;
+    } catch (error) {
+        console.log('Error checking IG for changes:', error);
+        return false;
+    }
+}
+
+// Enhanced file watcher that checks for IG changes
+function startFileWatcher() {
+    fileWatcher = setInterval(async function() {
+        updateButtonStates();
+
+        // Check each IG for changes (but not too frequently)
+        // Only check every 3rd iteration (every 15 seconds instead of 5)
+        if (!fileWatcher.checkCount) fileWatcher.checkCount = 0;
+        fileWatcher.checkCount++;
+
+        if (fileWatcher.checkCount % 3 === 0) {
+            await checkAllIgsForChanges();
+        }
+    }, 5000);
+}
+
+// Function to check all IGs for changes
+async function checkAllIgsForChanges() {
+    let anyChanges = false;
+
+    for (let i = 0; i < igList.length; i++) {
+        const ig = igList[i];
+        const hasChanges = await checkIgForChanges(ig, i);
+        if (hasChanges) {
+            anyChanges = true;
+        }
+    }
+
+    if (anyChanges) {
+        updateIgList();
+        saveIgList();
+
+        // Show a subtle notification
+        const selectedIg = getSelectedIg();
+        if (selectedIg) {
+            appendToIgConsole(selectedIg, 'ℹ️ Detected changes in project metadata');
+        }
+    }
 }

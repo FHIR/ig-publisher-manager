@@ -713,44 +713,49 @@
         <!-- IG List -->
         <div class="ig-list-container">
             <div class="ig-list-header">Implementation Guides</div>
+
             <div class="ig-list">
                 <table>
                     <thead>
-                        <tr>
-                            <th>Name</th>
-                            <th>Version</th>
-                            <th>Folder</th>
-                            <th>Build Status</th>
-                            <th>Build Time</th>
-                            <th>Built Size</th>
-                        </tr>
+                    <tr>
+                        <th>Name</th>
+                        <th>Version</th>
+                        <th>Git Branch</th>
+                        <th>Folder</th>
+                        <th>Build Status</th>
+                        <th>Build Time</th>
+                        <th>Built Size</th>
+                    </tr>
                     </thead>
                     <tbody id="ig-list-body">
-                        <!-- Sample data -->
-                        <tr class="selected">
-                            <td>US Core Implementation Guide</td>
-                            <td>6.1.0</td>
-                            <td>/Users/dev/fhir/us-core</td>
-                            <td><span class="status-badge status-success">Success</span></td>
-                            <td>2:34</td>
-                            <td>15.2 MB</td>
-                        </tr>
-                        <tr>
-                            <td>SMART App Launch</td>
-                            <td>2.0.0</td>
-                            <td>/Users/dev/fhir/smart-app-launch</td>
-                            <td><span class="status-badge status-error">Error</span></td>
-                            <td>1:12</td>
-                            <td>8.7 MB</td>
-                        </tr>
-                        <tr>
-                            <td>International Patient Summary</td>
-                            <td>1.1.0</td>
-                            <td>/Users/dev/fhir/ips</td>
-                            <td><span class="status-badge status-none">Not Built</span></td>
-                            <td>-</td>
-                            <td>-</td>
-                        </tr>
+                    <!-- Sample data with git branch -->
+                    <tr class="selected">
+                        <td>US Core Implementation Guide</td>
+                        <td>6.1.0</td>
+                        <td><span style="color: #28a745; font-weight: 500;">main</span></td>
+                        <td>/Users/dev/fhir/us-core</td>
+                        <td><span class="status-badge status-success">Success</span></td>
+                        <td>2:34</td>
+                        <td>15.2 MB</td>
+                    </tr>
+                    <tr>
+                        <td>SMART App Launch</td>
+                        <td>2.0.0</td>
+                        <td><span style="color: #6f42c1; font-weight: 500;">feature/v2</span></td>
+                        <td>/Users/dev/fhir/smart-app-launch</td>
+                        <td><span class="status-badge status-error">Error</span></td>
+                        <td>1:12</td>
+                        <td>8.7 MB</td>
+                    </tr>
+                    <tr>
+                        <td>International Patient Summary</td>
+                        <td>1.1.0</td>
+                        <td><span style="color: #6c757d;">-</span></td>
+                        <td>/Users/dev/fhir/ips</td>
+                        <td><span class="status-badge status-none">Not Built</span></td>
+                        <td>-</td>
+                        <td>-</td>
+                    </tr>
                     </tbody>
                 </table>
             </div>
