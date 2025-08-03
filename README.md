@@ -86,7 +86,10 @@ There are many ways to contribute:
    - **Windows**: `.exe` installer or portable `.exe`
    - **Linux**: `.AppImage`, `.deb`, or `.rpm`
 
-Note that the releases are not signed. On OSX, you'll have to do (something?).
+Note that the releases are not signed - setting up signing with EV certificates is tiresome 
+now that you need a physical key. On OSX, you'll have to do go to your security settings 
+and allow the IG Publisher Manager to run. if you trust GitHub and the build scripts and so
+forth.
 
 ### Build from Source
 ```bash
