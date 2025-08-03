@@ -1,3 +1,4 @@
+# .github/workflows/release.yml - Release Process
 name: Release
 
 on:
@@ -78,62 +79,105 @@ jobs:
     - name: Build for macOS
       if: matrix.os == 'macos-latest'
       run: npm run build-mac
-      
-    # Upload Linux files
-    - name: Upload Linux AppImage
+
+    # Linux uploads
+    - name: Find Linux files
       if: matrix.os == 'ubuntu-latest'
+      shell: bash
+      run: |
+        echo "APPIMAGE_FILE=$(find dist -name '*.AppImage' -type f | head -1)" >> $GITHUB_ENV
+        echo "DEB_FILE=$(find dist -name '*.deb' -type f | head -1)" >> $GITHUB_ENV
+        echo "RPM_FILE=$(find dist -name '*.rpm' -type f | head -1)" >> $GITHUB_ENV
+        
+    - name: Upload Linux AppImage
+      if: matrix.os == 'ubuntu-latest' && env.APPIMAGE_FILE != ''
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload-url }}
-        asset_path: ./dist/IG Publisher Manager-*.AppImage
+        asset_path: ${{ env.APPIMAGE_FILE }}
         asset_name: ig-publisher-manager-linux.AppImage
         asset_content_type: application/octet-stream
         
     - name: Upload Linux DEB
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-latest' && env.DEB_FILE != ''
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload-url }}
-        asset_path: ./dist/ig-publisher-manager_*.deb
+        asset_path: ${{ env.DEB_FILE }}
         asset_name: ig-publisher-manager-linux.deb
         asset_content_type: application/vnd.debian.binary-package
-        
-    # Upload Windows files
-    - name: Upload Windows Installer
-      if: matrix.os == 'windows-latest'
+
+    - name: Upload Linux RPM
+      if: matrix.os == 'ubuntu-latest' && env.RPM_FILE != ''
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload-url }}
-        asset_path: ./dist/IG Publisher Manager Setup *.exe
+        asset_path: ${{ env.RPM_FILE }}
+        asset_name: ig-publisher-manager-linux.rpm
+        asset_content_type: application/octet-stream
+
+    # Windows uploads
+    - name: Find Windows files
+      if: matrix.os == 'windows-latest'
+      shell: bash
+      run: |
+        echo "SETUP_FILE=$(find dist -name '*Setup*.exe' -type f | head -1)" >> $GITHUB_ENV
+        echo "PORTABLE_FILE=$(find dist -name '*.exe' -not -name '*Setup*' -type f | head -1)" >> $GITHUB_ENV
+        
+    - name: Upload Windows Installer
+      if: matrix.os == 'windows-latest' && env.SETUP_FILE != ''
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload-url }}
+        asset_path: ${{ env.SETUP_FILE }}
         asset_name: ig-publisher-manager-windows-installer.exe
         asset_content_type: application/octet-stream
         
     - name: Upload Windows Portable
-      if: matrix.os == 'windows-latest'
+      if: matrix.os == 'windows-latest' && env.PORTABLE_FILE != ''
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload-url }}
-        asset_path: ./dist/IG Publisher Manager *.exe
+        asset_path: ${{ env.PORTABLE_FILE }}
         asset_name: ig-publisher-manager-windows-portable.exe
         asset_content_type: application/octet-stream
-        
-    # Upload macOS files
-    - name: Upload macOS DMG
+
+    # macOS uploads
+    - name: Find macOS files
       if: matrix.os == 'macos-latest'
+      shell: bash
+      run: |
+        echo "DMG_FILE=$(find dist -name '*.dmg' -type f | head -1)" >> $GITHUB_ENV
+        echo "ZIP_FILE=$(find dist -name '*.zip' -type f | head -1)" >> $GITHUB_ENV
+        
+    - name: Upload macOS DMG
+      if: matrix.os == 'macos-latest' && env.DMG_FILE != ''
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload-url }}
-        asset_path: ./dist/IG Publisher Manager-*.dmg
+        asset_path: ${{ env.DMG_FILE }}
         asset_name: ig-publisher-manager-macos.dmg
         asset_content_type: application/octet-stream
-        
+
+    - name: Upload macOS ZIP
+      if: matrix.os == 'macos-latest' && env.ZIP_FILE != ''
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload-url }}
+        asset_path: ${{ env.ZIP_FILE }}
+        asset_name: ig-publisher-manager-macos.zip
+        asset_content_type: application/zip
