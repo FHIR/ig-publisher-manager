@@ -1,3 +1,4 @@
+# .github/workflows/build.yml - Build for Multiple Platforms
 name: Build
 
 on:
@@ -5,7 +6,6 @@ on:
   push:
     tags:
       - 'v*' # Trigger on version tags
-  push:
     branches: [ main ]
     paths-ignore:
       - '**.md'
