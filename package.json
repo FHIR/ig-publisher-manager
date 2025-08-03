@@ -22,8 +22,10 @@
     "electron",
     "desktop"
   ],
-  "author": "Grahame Grieve",
-  "email" : "grahameg@gmail.com",
+  "author": {
+    "name": "Grahame Grieve", 
+    "email": "grahame@hl7.org"
+  },
   "license": "BSD-3",
   "devDependencies": {
     "electron": "^27.0.0",
@@ -34,7 +36,7 @@
     "yaml": "^2.3.2"
   },
   "build": {
-    "appId": "com.yourcompany.ig-publisher-manager",
+    "appId": "org.fhir.ig-publisher-manager",
     "productName": "IG Publisher Manager",
     "directories": {
       "output": "dist",
@@ -96,7 +98,12 @@
         }
       ],
       "icon": "build/icon.png",
-      "category": "Development"
+      "category": "Development",
+      "maintainer": "Grahame Grieve <grahame@hl7.org>",
+      "vendor": "FHIR Foundaton",
+      "synopsis": "Desktop application for managing FHIR Implementation Guide publishing",
+      "description": "A desktop application that provides a graphical interface for building, testing, and managing multiple FHIR Implementation Guides using the IG Publisher tool."
+ 
     },
     "nsis": {
       "oneClick": false,
