@@ -86,6 +86,8 @@ There are many ways to contribute:
    - **Windows**: `.exe` installer or portable `.exe`
    - **Linux**: `.AppImage`, `.deb`, or `.rpm`
 
+Note that the releases are not signed. On OSX, you'll have to do (something?).
+
 ### Build from Source
 ```bash
 # Clone the repository
