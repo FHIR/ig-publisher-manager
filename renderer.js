@@ -9,6 +9,22 @@ let optionsPanelVisible = false;
 let buildProcesses = new Map();
 let fileWatcher = null;
 
+// Sort state
+let sortState = {
+    column: null,        // Currently sorted column
+    direction: 'asc',    // 'asc' or 'desc'
+    columnMap: {         // Map display names to data properties
+        'Name': 'name',
+        'Version': 'version',
+        'Git Branch': 'gitBranch',
+        'Folder': 'folder',
+        'Build Status': 'buildStatus',
+        'Build Time': 'buildTime',
+        'Built Size': 'builtSize',
+        'Last Build': 'lastBuildStart'
+    }
+};
+
 // DOM elements
 let igListBody;
 let buildOutput;
@@ -62,6 +78,8 @@ function loadSettings() {
         document.getElementById('no-network').checked = settings.noNetwork || false;
         document.getElementById('no-sushi').checked = settings.noSushi || false;
         document.getElementById('debugging').checked = settings.debugging || false;
+
+        loadSortState();
     } catch (error) {
         console.log('Could not load settings:', error);
     }
@@ -605,6 +623,8 @@ function setupEventListeners() {
 
     // Close context menus when clicking elsewhere
     document.addEventListener('click', closeContextMenus);
+
+    setupColumnHeaderListeners();
 }
 
 // Settings management
@@ -701,7 +721,8 @@ async function getJarPath(version) {
 
 function updateIgList() {
     if (!igListBody) return;
-    
+    sortIgList();
+
     igListBody.innerHTML = '';
     
     for (let i = 0; i < igList.length; i++) {
@@ -749,6 +770,8 @@ function updateIgList() {
             gitBranchDisplay = '<span style="color: #6c757d;">-</span>';
         }
 
+        const lastBuildDisplay = formatRelativeTime(ig.lastBuildStart);
+
         row.innerHTML = 
             '<td>' + ig.name + '</td>' +
             '<td>' + ig.version + '</td>' +
@@ -756,10 +779,13 @@ function updateIgList() {
             '<td>' + ig.folder + '</td>' +
             '<td><span class="status-badge ' + statusClass + '">' + (ig.buildStatus || 'Not Built') + '</span></td>' +
             '<td>' + (ig.buildTime || '-') + '</td>' +
-            '<td>' + (ig.builtSize || '-') + '</td>';
+            '<td>' + (ig.builtSize || '-') + '</td>' +
+          '<td>' + lastBuildDisplay + '</td>';
         
         igListBody.appendChild(row);
     }
+
+    updateColumnHeaders();
 
     // Auto-select first item if none selected
     if (selectedIgIndex === -1 && igList.length > 0) {
@@ -1147,7 +1173,9 @@ function buildIg() {
         appendToBuildOutput('Build already in progress for ' + ig.name);
         return;
     }
-    
+
+    ig.lastBuildStart = Date.now();
+
     resetIgConsole(ig, 'IG Publisher Build');
     appendToIgConsole(ig, 'Starting build for ' + ig.name);
     ig.buildStatus = 'Building';
@@ -2029,7 +2057,8 @@ function saveIgList() {
                 gitBranch: ig.gitBranch,
                 buildStatus: ig.buildStatus,
                 buildTime: ig.buildTime,
-                builtSize: ig.builtSize
+                builtSize: ig.builtSize,
+                lastBuildStart: ig.lastBuildStart
                 // Don't save console data
             };
             igListToSave.push(savedIg);
@@ -3115,6 +3144,11 @@ function startFileWatcher() {
     fileWatcher = setInterval(async function() {
         updateButtonStates();
 
+        const needsTimeUpdate = igList.some(ig => ig.lastBuildStart);
+        if (needsTimeUpdate) {
+            updateIgList(); // This will refresh the relative time displays
+        }
+
         // Check each IG for changes (but not too frequently)
         // Only check every 3rd iteration (every 15 seconds instead of 5)
         if (!fileWatcher.checkCount) fileWatcher.checkCount = 0;
@@ -3146,6 +3180,276 @@ async function checkAllIgsForChanges() {
         const selectedIg = getSelectedIg();
         if (selectedIg) {
             appendToIgConsole(selectedIg, 'ℹ️ Detected changes in project metadata');
+        }
+    }
+}
+
+function saveSortState() {
+    try {
+        localStorage.setItem('igListSortState', JSON.stringify(sortState));
+    } catch (error) {
+        console.log('Could not save sort state:', error);
+    }
+}
+
+function loadSortState() {
+    try {
+        const saved = localStorage.getItem('igListSortState');
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            sortState.column = parsed.column;
+            sortState.direction = parsed.direction;
+        }
+    } catch (error) {
+        console.log('Could not load sort state:', error);
+    }
+}
+
+// Sorting functions
+function compareValues(a, b, column) {
+    let aVal = a[column];
+    let bVal = b[column];
+
+    // Handle null/undefined values - put them at the end
+    if (aVal == null && bVal == null) return 0;
+    if (aVal == null) return 1;
+    if (bVal == null) return -1;
+
+    switch (column) {
+        case 'version':
+            return compareVersions(String(aVal), String(bVal));
+        case 'buildTime':
+            return compareBuildTimes(String(aVal), String(bVal));
+        case 'builtSize':
+            return compareFileSizes(String(aVal), String(bVal));
+        case 'buildStatus':
+            return compareBuildStatus(String(aVal), String(bVal));
+        case 'gitBranch':
+            return compareGitBranches(String(aVal), String(bVal));
+        case 'lastBuildStart':
+            return compareLastBuild(aVal, bVal);  // NEW
+        default:
+            // Default string comparison (case insensitive)
+            return String(aVal).toLowerCase().localeCompare(String(bVal).toLowerCase());
+    }
+}
+
+function compareVersions(a, b) {
+    // Handle special cases (case insensitive)
+    const aLower = a.toLowerCase();
+    const bLower = b.toLowerCase();
+
+    if (aLower === 'unknown' && bLower === 'unknown') return 0;
+    if (aLower === 'unknown') return 1;
+    if (bLower === 'unknown') return -1;
+
+    // Split versions into parts and compare numerically where possible
+    const aParts = a.split(/[.\-]/);
+    const bParts = b.split(/[.\-]/);
+    const maxLength = Math.max(aParts.length, bParts.length);
+
+    for (let i = 0; i < maxLength; i++) {
+        const aPart = aParts[i] || '0';
+        const bPart = bParts[i] || '0';
+
+        // Try to compare as numbers first
+        const aNum = parseInt(aPart, 10);
+        const bNum = parseInt(bPart, 10);
+
+        if (!isNaN(aNum) && !isNaN(bNum)) {
+            if (aNum !== bNum) return aNum - bNum;
+        } else {
+            // Fall back to case-insensitive string comparison
+            const comparison = aPart.toLowerCase().localeCompare(bPart.toLowerCase());
+            if (comparison !== 0) return comparison;
+        }
+    }
+
+    return 0;
+}
+
+function compareBuildTimes(a, b) {
+    // Handle special cases
+    if (a === '-' && b === '-') return 0;
+    if (a === '-') return 1;
+    if (b === '-') return -1;
+
+    // Parse time strings like "2:34" or "1:12"
+    const parseTime = (timeStr) => {
+        const parts = timeStr.split(':');
+        if (parts.length === 2) {
+            return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+        }
+        return 0;
+    };
+
+    return parseTime(a) - parseTime(b);
+}
+
+function compareFileSizes(a, b) {
+    // Handle special cases
+    if (a === '-' && b === '-') return 0;
+    if (a === '-') return 1;
+    if (b === '-') return -1;
+
+    // Parse size strings like "15.2 MB" or "8.7 MB" (case insensitive)
+    const parseSize = (sizeStr) => {
+        const match = sizeStr.match(/^([\d.]+)\s*(MB|KB|GB)/i);
+        if (match) {
+            const value = parseFloat(match[1]);
+            const unit = match[2].toUpperCase();
+            switch (unit) {
+                case 'GB': return value * 1024 * 1024;
+                case 'MB': return value * 1024;
+                case 'KB': return value;
+                default: return value;
+            }
+        }
+        return 0;
+    };
+
+    return parseSize(a) - parseSize(b);
+}
+
+function compareBuildStatus(a, b) {
+    // Define status priority order (case insensitive)
+    const statusOrder = {
+        'success': 1,
+        'building': 2,
+        'error': 3,
+        'stopped': 4,
+        'not built': 5
+    };
+
+    const aOrder = statusOrder[a.toLowerCase()] || 999;
+    const bOrder = statusOrder[b.toLowerCase()] || 999;
+
+    return aOrder - bOrder;
+}
+
+function compareGitBranches(a, b) {
+    // Handle special cases
+    if (a === '-' && b === '-') return 0;
+    if (a === '-') return 1;
+    if (b === '-') return -1;
+
+    // Prioritize common branches (case insensitive)
+    const branchPriority = {
+        'main': 1,
+        'master': 2,
+        'develop': 3,
+        'dev': 4
+    };
+
+    const aPriority = branchPriority[a.toLowerCase()] || 999;
+    const bPriority = branchPriority[b.toLowerCase()] || 999;
+
+    if (aPriority !== bPriority) {
+        return aPriority - bPriority;
+    }
+
+    // Fall back to case-insensitive alphabetical
+    return a.toLowerCase().localeCompare(b.toLowerCase());
+}
+
+// NEW FUNCTION: Compare last build timestamps
+function compareLastBuild(a, b) {
+    // Handle null/undefined timestamps - they go to the end
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+
+    // More recent builds should come first (descending by default for this column)
+    return b - a;
+}
+
+function sortIgList() {
+    if (!sortState.column) return;
+
+    const dataColumn = sortState.columnMap[sortState.column];
+    if (!dataColumn) return;
+
+    igList.sort((a, b) => {
+        const comparison = compareValues(a, b, dataColumn);
+        return sortState.direction === 'asc' ? comparison : -comparison;
+    });
+}
+
+function handleColumnHeaderClick(columnName) {
+    if (sortState.column === columnName) {
+        // Same column - toggle direction
+        sortState.direction = sortState.direction === 'asc' ? 'desc' : 'asc';
+    } else {
+        // New column - default to ascending
+        sortState.column = columnName;
+        sortState.direction = 'asc';
+    }
+
+    saveSortState();
+    updateIgList();
+}
+
+function updateColumnHeaders() {
+    const headers = document.querySelectorAll('.ig-list th[data-column]');
+
+    headers.forEach(th => {
+        const columnName = th.dataset.column;
+
+        // Remove existing sort indicators
+        th.textContent = columnName;
+        th.classList.remove('sort-asc', 'sort-desc');
+
+        // Add current sort indicator
+        if (sortState.column === columnName) {
+            const indicator = sortState.direction === 'asc' ? ' ↑' : ' ↓';
+            th.textContent = columnName + indicator;
+            th.classList.add(`sort-${sortState.direction}`);
+        }
+    });
+}
+
+function setupColumnHeaderListeners() {
+    // Wait for DOM to be ready, then set up listeners
+    setTimeout(() => {
+        const headers = document.querySelectorAll('.ig-list th[data-column]');
+        headers.forEach(th => {
+            th.style.cursor = 'pointer';
+            th.style.userSelect = 'none';
+            th.addEventListener('click', () => {
+                handleColumnHeaderClick(th.dataset.column);
+            });
+        });
+    }, 100);
+}
+
+function formatRelativeTime(timestamp) {
+    if (!timestamp) return '-';
+
+    const now = Date.now();
+    const diffMs = now - timestamp;
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHour = Math.floor(diffMin / 60);
+    const diffDay = Math.floor(diffHour / 24);
+    const diffWeek = Math.floor(diffDay / 7);
+
+    if (diffSec < 60) {
+        return 'just now';
+    } else if (diffMin < 60) {
+        return diffMin === 1 ? '1 min ago' : `${diffMin} mins ago`;
+    } else if (diffHour < 24) {
+        return diffHour === 1 ? '1 hr ago' : `${diffHour} hrs ago`;
+    } else if (diffDay < 7) {
+        return diffDay === 1 ? '1 day ago' : `${diffDay} days ago`;
+    } else if (diffWeek < 4) {
+        return diffWeek === 1 ? '1 wk ago' : `${diffWeek} wks ago`;
+    } else {
+        const diffMonth = Math.floor(diffDay / 30);
+        if (diffMonth < 12) {
+            return diffMonth === 1 ? '1 mo ago' : `${diffMonth} mos ago`;
+        } else {
+            const diffYear = Math.floor(diffDay / 365);
+            return diffYear === 1 ? '1 yr ago' : `${diffYear} yrs ago`;
         }
     }
 }

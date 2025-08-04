@@ -553,6 +553,49 @@
             width: 16px;
             text-align: center;
         }
+
+        .ig-list th[data-column] {
+            cursor: pointer;
+            user-select: none;
+            position: relative;
+            transition: background-color 0.2s ease;
+            white-space: nowrap;
+        }
+
+        .ig-list th[data-column]:hover {
+            background: #e9ecef;
+        }
+
+        .ig-list th[data-column]:active {
+            background: #dee2e6;
+        }
+
+        /* Sort indicators */
+        .ig-list th.sort-asc {
+            background: #e3f2fd;
+        }
+
+        .ig-list th.sort-desc {
+            background: #e3f2fd;
+        }
+        .ig-list td:nth-child(8) {
+            font-size: 12px;
+            color: #666;
+            font-style: italic;
+        }
+
+        /* Column width adjustments */
+        .ig-list table {
+            table-layout: fixed;
+        }
+        .ig-list th:nth-child(1) { width: 20%; } /* Name */
+        .ig-list th:nth-child(2) { width: 8%; }  /* Version */
+        .ig-list th:nth-child(3) { width: 10%; } /* Git Branch */
+        .ig-list th:nth-child(4) { width: 30%; } /* Folder */
+        .ig-list th:nth-child(5) { width: 10%; } /* Build Status */
+        .ig-list th:nth-child(6) { width: 8%; }  /* Build Time */
+        .ig-list th:nth-child(7) { width: 8%; }  /* Built Size */
+        .ig-list th:nth-child(8) { width: 6%; }  /* Last Build */
     </style>
 </head>
 <body>
@@ -718,13 +761,14 @@
                 <table>
                     <thead>
                     <tr>
-                        <th>Name</th>
-                        <th>Version</th>
-                        <th>Git Branch</th>
-                        <th>Folder</th>
-                        <th>Build Status</th>
-                        <th>Build Time</th>
-                        <th>Built Size</th>
+                        <th data-column="Name">Name</th>
+                        <th data-column="Version">Version</th>
+                        <th data-column="Git Branch">Git Branch</th>
+                        <th data-column="Folder">Folder</th>
+                        <th data-column="Build Status">Build Status</th>
+                        <th data-column="Build Time">Build Time</th>
+                        <th data-column="Built Size">Built Size</th>
+                        <th data-column="Last Build">Last Build</th>
                     </tr>
                     </thead>
                     <tbody id="ig-list-body">
