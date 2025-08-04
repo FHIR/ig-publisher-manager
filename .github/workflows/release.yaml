@@ -41,9 +41,13 @@ jobs:
           - **Linux**: `.AppImage` (universal), `.deb` (Debian/Ubuntu), or `.rpm` (RedHat/Fedora)
           
           ## Requirements
-          - Java 11 or later
-          - Git (for repository operations)
-          - Jekyll (optional, for Jekyll builds)
+          - [IG Publisher Requirements](https://confluence.hl7.org/spaces/FHIR/pages/35718627/IG+Publisher+Documentation): Java 11 + Ruby + Jekyll
+          - Permission to Install applications
+          
+          ## Security Note 
+          - These binaries are not signed (Yay for EV certificates that require a physical dongle)
+          - On OSX, you'll have to go to the security settings and enable the application
+
         draft: false
         prerelease: false
 
