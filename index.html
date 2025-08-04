@@ -634,6 +634,10 @@
         <button id="btn-tools" title="Dev Tools..." disabled>
             <img src="assets/icons/devtools.png" width="32" height="32" alt="">
         </button>
+        <div class="toolbar-separator"></div>
+        <button id="btn-documentation" title="Documentation">
+            <img src="assets/icons/documentation.png" width="32" height="32" alt="">
+        </button>
         
         <!-- Spacer to push toggle to the right -->
         <div style="flex: 1;"></div>
@@ -748,6 +752,36 @@
         <div class="context-menu-separator"></div>
         <div class="context-menu-item" data-action="clear-log">
             <span class="menu-icon">🗑️</span>Clear Log
+        </div>
+    </div>
+
+    <div id="documentation-menu" class="context-menu" style="display: none;">
+        <div class="context-menu-item" data-action="ig-getting-started">
+            <span class="menu-icon">🚀</span>IG Publisher - Getting Started
+        </div>
+        <div class="context-menu-item" data-action="ig-using-tool">
+            <span class="menu-icon">🔧</span>IG Publisher - Using the Tool
+        </div>
+        <div class="context-menu-item" data-action="ig-writing-igs">
+            <span class="menu-icon">✍️</span>IG Publisher - Writing IGs
+        </div>
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-item" data-action="sushi-docs">
+            <span class="menu-icon">🍣</span>Sushi Documentation
+        </div>
+        <div class="context-menu-item" data-action="fsh-docs">
+            <span class="menu-icon">📝</span>FSH Documentation
+        </div>
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-item" data-action="publishing-website">
+            <span class="menu-icon">🌐</span>Publishing to a Website
+        </div>
+        <div class="context-menu-item" data-action="fhir-validator">
+            <span class="menu-icon">✅</span>Using the FHIR Validator
+        </div>
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-item" data-action="check-updates">
+            <span class="menu-icon">🔄</span>Check for Updates
         </div>
     </div>
 
