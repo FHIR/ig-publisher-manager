@@ -1,4 +1,4 @@
-# .github/workflows/release.yml - Release Process
+# .github/workflows/release.yml - Enhanced Release Process with Manual Notes
 name: Release
 
 on:
@@ -11,6 +11,15 @@ on:
         description: 'Release version (e.g., v1.0.0)'
         required: true
         type: string
+      release_notes:
+        description: 'Release notes (markdown supported). Leave empty to use CHANGELOG.md'
+        required: false
+        type: string
+      create_draft:
+        description: 'Create as draft release (allows manual editing before publish)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   create-release:
@@ -22,33 +31,91 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       
+    - name: Extract version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+        else
+          echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        fi
+      
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        
+        # If manual release notes provided, use those
+        if [ -n "${{ github.event.inputs.release_notes }}" ]; then
+          echo "source=manual" >> $GITHUB_OUTPUT
+          cat << 'EOF' > release_notes.md
+        ${{ github.event.inputs.release_notes }}
+        EOF
+        
+        # Otherwise, try to extract from CHANGELOG.md
+        elif [ -f "CHANGELOG.md" ]; then
+          echo "source=changelog" >> $GITHUB_OUTPUT
+          echo "Extracting release notes from CHANGELOG.md for version $VERSION"
+          
+          # Extract section between the version header and next version/end of file
+          awk -v version="$VERSION" '
+            BEGIN { found=0; printing=0 }
+            /^## / { 
+              if (found && printing) exit
+              if ($0 ~ version) { found=1; printing=1; next }
+              else { printing=0 }
+            }
+            printing && !/^## / { print }
+          ' CHANGELOG.md > release_notes.md
+          
+          # If nothing found, create a default entry
+          if [ ! -s release_notes.md ]; then
+            echo "No release notes found in CHANGELOG.md for $VERSION, using default"
+            echo "- Release $VERSION" > release_notes.md
+          fi
+        
+        # Fallback to basic release notes
+        else
+          echo "source=default" >> $GITHUB_OUTPUT
+          echo "- Release $VERSION" > release_notes.md
+        fi
+        
+        # Add standard download section
+        cat >> release_notes.md << 'EOF'
+
+        ## Downloads
+        Choose the appropriate file for your platform:
+        - **Windows**: `.exe` installer or portable `.exe`
+        - **macOS**: `.dmg` disk image
+        - **Linux**: `.AppImage` (universal), `.deb` (Debian/Ubuntu), or `.rpm` (RedHat/Fedora)
+        
+        ## Requirements
+        - [IG Publisher Requirements](https://confluence.hl7.org/spaces/FHIR/pages/35718627/IG+Publisher+Documentation): Java 11 + Ruby + Jekyll
+        - Permission to Install applications
+        
+        ## Security Note 
+        - These binaries are not signed (Yay for EV certificates that require a physical dongle)
+        - On OSX, you'll have to go to the security settings and enable the application
+        EOF
+        
+        echo "Generated release notes from: $(cat release_notes.md | wc -l) lines"
+        
+    - name: Show release notes preview
+      run: |
+        echo "=== RELEASE NOTES PREVIEW ==="
+        cat release_notes.md
+        echo "=== END PREVIEW ==="
+        
     - name: Create Release
       id: create-release
       uses: actions/create-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ github.event.inputs.version || github.ref_name }}
-        release_name: IG Publisher Manager ${{ github.event.inputs.version || github.ref_name }}
-        body: |
-          ## Changes
-          - Release ${{ github.event.inputs.version || github.ref_name }}
-          
-          ## Downloads
-          Choose the appropriate file for your platform:
-          - **Windows**: `.exe` installer or portable `.exe`
-          - **macOS**: `.dmg` disk image
-          - **Linux**: `.AppImage` (universal), `.deb` (Debian/Ubuntu), or `.rpm` (RedHat/Fedora)
-          
-          ## Requirements
-          - [IG Publisher Requirements](https://confluence.hl7.org/spaces/FHIR/pages/35718627/IG+Publisher+Documentation): Java 11 + Ruby + Jekyll
-          - Permission to Install applications
-          
-          ## Security Note 
-          - These binaries are not signed (Yay for EV certificates that require a physical dongle)
-          - On OSX, you'll have to go to the security settings and enable the application
-
-        draft: false
+        tag_name: ${{ steps.version.outputs.version }}
+        release_name: IG Publisher Manager ${{ steps.version.outputs.version }}
+        body_path: release_notes.md
+        draft: ${{ github.event.inputs.create_draft == 'true' }}
         prerelease: false
 
   build-and-upload:

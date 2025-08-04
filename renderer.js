@@ -623,6 +623,7 @@ function setupEventListeners() {
 
     // Close context menus when clicking elsewhere
     document.addEventListener('click', closeContextMenus);
+    document.getElementById('btn-documentation').addEventListener('click', showDocumentationMenu);
 
     setupColumnHeaderListeners();
 }
@@ -2828,6 +2829,9 @@ function closeContextMenus() {
     if (toolsMenu) toolsMenu.style.display = 'none';
     if (igContextMenu) igContextMenu.style.display = 'none';
     if (buildOutputContextMenu) buildOutputContextMenu.style.display = 'none';
+    const documentationMenu = document.getElementById('documentation-menu');
+    if (documentationMenu) documentationMenu.style.display = 'none';
+
 }
 
 // Update the setupContextMenus function to include the new menu
@@ -2846,6 +2850,15 @@ function setupContextMenus() {
     // IG context menu
     setupIgContextMenu();
     setupBuildOutputContextMenu();
+    // Documentation menu items
+    const documentationMenuItems = document.querySelectorAll('#documentation-menu .context-menu-item');
+    for (let i = 0; i < documentationMenuItems.length; i++) {
+        documentationMenuItems[i].addEventListener('click', function(e) {
+            const action = e.target.dataset.action;
+            handleDocumentationAction(action);
+            closeContextMenus();
+        });
+    }
 }
 
 function setupBuildOutput() {
@@ -3450,6 +3463,40 @@ function formatRelativeTime(timestamp) {
         } else {
             const diffYear = Math.floor(diffDay / 365);
             return diffYear === 1 ? '1 yr ago' : `${diffYear} yrs ago`;
+        }
+    }
+}
+
+function showDocumentationMenu(event) {
+    const menu = document.getElementById('documentation-menu');
+    const rect = event.target.getBoundingClientRect();
+
+    menu.style.display = 'block';
+    menu.style.left = rect.left + 'px';
+    menu.style.top = (rect.bottom + 5) + 'px';
+
+    event.stopPropagation();
+}
+
+async function handleDocumentationAction(action) {
+    const documentationUrls = {
+        'ig-getting-started': 'https://hl7.github.io/docs/ig_publisher/getting-started',
+        'ig-using-tool': 'https://confluence.hl7.org/spaces/FHIR/pages/35718627/IG+Publisher+Documentation',
+        'ig-writing-igs': 'https://build.fhir.org/ig/FHIR/ig-guidance/',
+        'sushi-docs': 'https://github.com/FHIR/sushi',
+        'fsh-docs': 'https://build.fhir.org/ig/HL7/fhir-shorthand/',
+        'publishing-website': 'https://build.fhir.org/ig/ElliotSilver/how-to-publish/publication.html',
+        'fhir-validator': 'https://confluence.hl7.org/spaces/FHIR/pages/35718580/Using+the+FHIR+Validator',
+        'check-updates': 'https://github.com/FHIR/ig-publisher-manager/releases'
+    };
+
+    const url = documentationUrls[action];
+    if (url) {
+        try {
+            appendToBuildOutput('Opening documentation: ' + url);
+            await ipcRenderer.invoke('open-external', url);
+        } catch (error) {
+            appendToBuildOutput('Failed to open documentation: ' + error.message);
         }
     }
 }
