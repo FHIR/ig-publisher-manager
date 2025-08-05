@@ -801,6 +801,7 @@ function getStatusClass(status) {
         'Success': 'status-success',
         'Error': 'status-error',
         'Building': 'status-building',
+        'Publishing': 'status-publishing',
         'Not Built': 'status-none'
     };
     return statusMap[status] || 'status-none';
@@ -812,7 +813,11 @@ function updateButtonStates() {
     const hasSelection = ig !== null;
     const isBuilding = hasSelection && buildProcesses.has(selectedIgIndex);
     const isGitRepo = hasSelection && checkIfGitRepo(ig ? ig.folder : null);
-    
+
+    const canPublishToWebsite = hasSelection &&
+      checkFileExists(ig ? ig.folder : null, 'output/qa.json') &&
+      checkFileExists(ig ? ig.folder : null, 'publication-request.json');
+
     setButtonState('btn-delete', hasSelection);
     setButtonState('btn-build', hasSelection && !isBuilding);
     setButtonState('btn-stop', hasSelection && isBuilding);
@@ -1629,7 +1634,7 @@ function showCopyMenu(event) {
             const item = menuItems[i];
             const menuItem = document.createElement('div');
             menuItem.className = 'context-menu-item';
-            menuItem.textContent = item.label;
+            menuItem.innerHTML = `<span class="menu-icon">${item.icon}</span>${item.label}`;
             menuItem.addEventListener('click', function() {
                 handleCopyAction(item.action, item.value);
                 closeContextMenus();
@@ -1652,7 +1657,8 @@ async function buildCopyMenuItems(ig) {
     items.push({
         action: 'copy-folder-path',
         label: 'Folder Path',
-        value: ig.folder
+        value: ig.folder,
+        icon: '📁'
     });
 
     // Try to get package ID
@@ -1801,6 +1807,9 @@ async function handleToolsAction(action) {
             break;
         case 'open-settings':
             await openSettingsFile();
+            break;
+        case 'publish-to-website':
+            await showPublishToWebsiteDialog(ig);
             break;
     }
 }
@@ -2841,6 +2850,11 @@ function setupContextMenus() {
     const toolsMenuItems = document.querySelectorAll('#tools-menu .context-menu-item');
     for (let i = 0; i < toolsMenuItems.length; i++) {
         toolsMenuItems[i].addEventListener('click', function(e) {
+            if (this.classList.contains('disabled')) {
+                e.preventDefault();
+                return;
+            }
+
             const action = e.target.dataset.action;
             handleToolsAction(action);
             closeContextMenus();
@@ -3499,4 +3513,572 @@ async function handleDocumentationAction(action) {
             appendToBuildOutput('Failed to open documentation: ' + error.message);
         }
     }
+}
+
+function updateToolsMenuStates(canPublishToWebsite) {
+    const publishItem = document.querySelector('#tools-menu .context-menu-item[data-action="publish-to-website"]');
+    if (publishItem) {
+        if (canPublishToWebsite) {
+            publishItem.classList.remove('disabled');
+        } else {
+            publishItem.classList.add('disabled');
+        }
+    }
+}
+
+// 4. ADD function to load publication settings
+function loadPublicationSettings() {
+    try {
+        const settings = JSON.parse(localStorage.getItem('publicationSettings') || '{}');
+        return {
+            websiteFolder: settings.websiteFolder || '',
+            registryFile: settings.registryFile || '',
+            historyTemplates: settings.historyTemplates || '',
+            webTemplates: settings.webTemplates || '',
+            zipArchive: settings.zipArchive || ''
+        };
+    } catch (error) {
+        console.log('Could not load publication settings:', error);
+        return {
+            websiteFolder: '',
+            registryFile: '',
+            historyTemplates: '',
+            webTemplates: '',
+            zipArchive: ''
+        };
+    }
+}
+
+// 5. ADD function to save publication settings
+function savePublicationSettings(settings) {
+    try {
+        localStorage.setItem('publicationSettings', JSON.stringify(settings));
+    } catch (error) {
+        console.log('Could not save publication settings:', error);
+    }
+}
+
+// 6. ADD function to read publication request file
+async function readPublicationRequest(folder) {
+    try {
+        const publicationRequestPath = path.join(folder, 'publication-request.json');
+        if (!fs.existsSync(publicationRequestPath)) {
+            throw new Error('publication-request.json file not found');
+        }
+
+        const content = fs.readFileSync(publicationRequestPath, 'utf8');
+
+        // Try to parse as JSON first
+        try {
+            return JSON.parse(content);
+        } catch (jsonError) {
+            // If not JSON, try to parse as simple key-value format
+            const result = {};
+            const lines = content.split('\n');
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed && !trimmed.startsWith('#')) {
+                    const colonIndex = trimmed.indexOf(':');
+                    if (colonIndex > 0) {
+                        const key = trimmed.substring(0, colonIndex).trim();
+                        const value = trimmed.substring(colonIndex + 1).trim();
+                        result[key] = value;
+                    }
+                }
+            }
+            return result;
+        }
+    } catch (error) {
+        throw new Error(`Failed to read publication-request.json: ${error.message}`);
+    }
+}
+
+// 7. ADD function to read QA JSON file
+async function readQAJson(folder) {
+    try {
+        const qaJsonPath = path.join(folder, 'output', 'qa.json');
+        if (!fs.existsSync(qaJsonPath)) {
+            throw new Error('qa.json file not found in output folder');
+        }
+
+        const content = fs.readFileSync(qaJsonPath, 'utf8');
+        return JSON.parse(content);
+    } catch (error) {
+        throw new Error(`Failed to read qa.json: ${error.message}`);
+    }
+}
+
+// 8. ADD function to validate publication data
+async function validatePublicationData(ig) {
+    const validation = {
+        success: true,
+        messages: [],
+        publicationRequest: null,
+        qaData: null
+    };
+
+    try {
+        // Read publication request
+        validation.publicationRequest = await readPublicationRequest(ig.folder);
+        validation.messages.push('✓ Publication request file loaded successfully');
+    } catch (error) {
+        validation.success = false;
+        validation.messages.push(`✗ ${error.message}`);
+        return validation;
+    }
+
+    try {
+        // Read QA JSON
+        validation.qaData = await readQAJson(ig.folder);
+        validation.messages.push('✓ QA JSON file loaded successfully');
+    } catch (error) {
+        validation.success = false;
+        validation.messages.push(`✗ ${error.message}`);
+        return validation;
+    }
+
+    // Validate package ID match
+    const pubPackageId = validation.publicationRequest.packageId || validation.publicationRequest['package-id'];
+    const qaPackageId = validation.qaData['package-id'];
+
+    if (pubPackageId && qaPackageId) {
+        if (pubPackageId === qaPackageId) {
+            validation.messages.push('✓ Package IDs match');
+        } else {
+            validation.success = false;
+            validation.messages.push(`✗ Package ID mismatch: publication-request.json has "${pubPackageId}", qa.json has "${qaPackageId}"`);
+        }
+    } else {
+        validation.messages.push('⚠ Could not verify package ID match (missing data)');
+    }
+
+    // Validate version match
+    const pubVersion = validation.publicationRequest.version || validation.publicationRequest['ig-version'];
+    const qaVersion = validation.qaData['ig-ver'];
+
+    if (pubVersion && qaVersion) {
+        if (pubVersion === qaVersion) {
+            validation.messages.push('✓ Versions match');
+        } else {
+            validation.success = false;
+            validation.messages.push(`✗ Version mismatch: publication-request.json has "${pubVersion}", qa.json has "${qaVersion}"`);
+        }
+    } else {
+        validation.messages.push('⚠ Could not verify version match (missing data)');
+    }
+
+    const currentSettings = getCurrentSettings();
+    if (currentSettings.igPublisherVersion !== 'latest') {
+        validation.success = false;
+        validation.messages.push(`✗ IG Publisher version must be "latest", currently set to "${currentSettings.igPublisherVersion}"`);
+    }
+
+    // NEW: Check that no option checkboxes are selected
+    const optionErrors = [];
+    if (currentSettings.noNarrative) {
+        optionErrors.push('No Narrative');
+    }
+    if (currentSettings.noValidation) {
+        optionErrors.push('No Validation');
+    }
+    if (currentSettings.noNetwork) {
+        optionErrors.push('No Network');
+    }
+    if (currentSettings.noSushi) {
+        optionErrors.push('No Sushi');
+    }
+    if (currentSettings.debugging) {
+        optionErrors.push('Debugging');
+    }
+    if (optionErrors.length > 0) {
+        validation.success = false;
+        validation.messages.push(`✗ Publication options must be disabled. Currently enabled: ${optionErrors.join(', ')}`);
+    }
+
+    return validation;
+}
+
+// 9. ADD function to show the publish to website dialog
+async function showPublishToWebsiteDialog(ig) {
+    // Check prerequisites
+    if (!checkFileExists(ig.folder, 'output/qa.json')) {
+        appendToBuildOutput('✗ qa.json not found in output folder. Build the IG first.');
+        return;
+    }
+
+    if (!checkFileExists(ig.folder, 'publication-request.json')) {
+        appendToBuildOutput('✗ publication-request.json file not found in IG folder.');
+        return;
+    }
+
+    // Validate publication data
+    const validation = await validatePublicationData(ig);
+
+    // Load saved settings
+    const settings = loadPublicationSettings();
+
+    return new Promise(function(resolve) {
+        const dialog = document.createElement('div');
+        dialog.innerHTML = createPublishDialogHTML(ig, validation, settings);
+
+        // Add resolver function to window
+        window.resolvePublishDialog = function(action) {
+            if (action === 'go') {
+                const newSettings = {
+                    websiteFolder: document.getElementById('pub-website-folder').value.trim(),
+                    registryFile: document.getElementById('pub-registry-file').value.trim(),
+                    historyTemplates: document.getElementById('pub-history-templates').value.trim(),
+                    webTemplates: document.getElementById('pub-web-templates').value.trim(),
+                    zipArchive: document.getElementById('pub-zip-archive').value.trim()
+                };
+
+                // Validate required fields
+                if (!newSettings.websiteFolder || !newSettings.registryFile ||
+                  !newSettings.historyTemplates || !newSettings.webTemplates ||
+                  !newSettings.zipArchive) {
+                    alert('Please fill in all required fields');
+                    return;
+                }
+
+                // NEW: Check for spaces in paths
+                const pathsWithSpaces = validateNoSpacesInPaths(newSettings);
+                if (pathsWithSpaces.length > 0) {
+                    alert(`Error: The following paths contain spaces, which are not allowed:\n\n${pathsWithSpaces.join('\n')}\n\nPlease use paths without spaces.`);
+                    return;
+                }
+
+                // Save settings
+                savePublicationSettings(newSettings);
+
+                document.body.removeChild(dialog);
+                delete window.resolvePublishDialog;
+
+                // NEW: Start the publication process
+                startPublishProcess(ig, newSettings);
+                resolve('go');
+            } else {
+                document.body.removeChild(dialog);
+                delete window.resolvePublishDialog;
+                resolve('cancel');
+            }
+        };
+
+        document.body.appendChild(dialog);
+        setupPublishDialogListeners(dialog);
+    });
+}
+
+function validateNoSpacesInPaths(settings) {
+    const pathsWithSpaces = [];
+
+    if (settings.websiteFolder && settings.websiteFolder.includes(' ')) {
+        pathsWithSpaces.push('Web Site Folder: ' + settings.websiteFolder);
+    }
+    if (settings.registryFile && settings.registryFile.includes(' ')) {
+        pathsWithSpaces.push('Registry File: ' + settings.registryFile);
+    }
+    if (settings.historyTemplates && settings.historyTemplates.includes(' ')) {
+        pathsWithSpaces.push('History Templates: ' + settings.historyTemplates);
+    }
+    if (settings.webTemplates && settings.webTemplates.includes(' ')) {
+        pathsWithSpaces.push('Web Templates: ' + settings.webTemplates);
+    }
+    if (settings.zipArchive && settings.zipArchive.includes(' ')) {
+        pathsWithSpaces.push('Zip Archive Folder: ' + settings.zipArchive);
+    }
+
+    return pathsWithSpaces;
+}
+
+async function startPublishProcess(ig, publishSettings) {
+    // Check if this IG is already building/publishing
+    if (buildProcesses.has(selectedIgIndex)) {
+        appendToBuildOutput('Build/publish already in progress for ' + ig.name);
+        return;
+    }
+
+    // Set timestamp and status
+    ig.lastBuildStart = Date.now();
+
+    resetIgConsole(ig, 'IG Publisher - Website Publication');
+    appendToIgConsole(ig, 'Starting website publication for ' + ig.name);
+    appendToIgConsole(ig, 'Publication mode: go-publish');
+
+    ig.buildStatus = 'Publishing';
+    updateIgList();
+    updateButtonStates();
+
+    try {
+        const appSettings = getCurrentSettings();
+        let version = appSettings.igPublisherVersion;
+        let downloadUrl = null;
+
+        // Get download URL for the selected version (should be "latest")
+        if (version === 'latest') {
+            const savedVersions = loadSavedPublisherVersions();
+            if (savedVersions && savedVersions.length > 0) {
+                version = savedVersions[0].version;
+                downloadUrl = savedVersions[0].url;
+                appendToIgConsole(ig, 'Using latest version: ' + version);
+            } else {
+                throw new Error('No publisher versions available. Please check internet connection.');
+            }
+        } else {
+            // This shouldn't happen due to validation, but just in case
+            const savedVersions = loadSavedPublisherVersions();
+            if (savedVersions) {
+                for (let i = 0; i < savedVersions.length; i++) {
+                    if (savedVersions[i].version === version) {
+                        downloadUrl = savedVersions[i].url;
+                        break;
+                    }
+                }
+            }
+
+            if (!downloadUrl) {
+                throw new Error('Download URL not found for version ' + version);
+            }
+        }
+
+        appendToIgConsole(ig, 'IG Publisher version: ' + version);
+        appendToIgConsole(ig, 'Memory limit: ' + appSettings.maxMemory + 'GB');
+
+        // Ensure JAR exists (download if necessary)
+        const jarPath = await ensureJarExists(version, downloadUrl, ig);
+
+        // Build publication command
+        const command = buildPublishCommand(ig, jarPath, publishSettings);
+        appendToIgConsole(ig, 'Command: ' + command.join(' '));
+
+        // Start the Java process
+        const publishProcess = await runIgPublisherProcess(ig, command);
+
+        // Store the process for stopping if needed
+        buildProcesses.set(selectedIgIndex, publishProcess);
+
+    } catch (error) {
+        appendToIgConsole(ig, 'Publication setup failed: ' + error.message);
+        ig.buildStatus = 'Error';
+        updateIgList();
+        updateButtonStates();
+    }
+}
+
+function buildPublishCommand(ig, jarPath, publishSettings) {
+    const appSettings = getCurrentSettings();
+
+    const command = ['java'];
+
+    // Add memory setting
+    command.push('-Xmx' + appSettings.maxMemory + 'G');
+
+    // Add JAR
+    command.push('-jar');
+    command.push(jarPath);
+
+    // Add publication-specific parameters
+    command.push('-go-publish');
+    command.push('-source');
+    command.push(ig.folder);
+    command.push('-web');
+    command.push(publishSettings.websiteFolder);
+    command.push('-registry');
+    command.push(publishSettings.registryFile);
+    command.push('-history');
+    command.push(publishSettings.historyTemplates);
+    command.push('-templates');
+    command.push(publishSettings.webTemplates);
+    command.push('-zips');
+    command.push(publishSettings.zipArchive);
+
+    // Add terminology server if specified
+    if (appSettings.terminologyServer && appSettings.terminologyServer.trim()) {
+        command.push('-tx');
+        command.push(appSettings.terminologyServer.trim());
+    }
+
+    return command;
+}
+
+// 10. ADD function to create the dialog HTML
+function createPublishDialogHTML(ig, validation, settings) {
+    const publicationSummary = createPublicationSummary(validation);
+    const validationStatus = createValidationStatus(validation);
+
+    return `
+        <div class="dialog-overlay">
+            <div class="dialog publication-dialog">
+                <div class="dialog-header">Publish "${ig.name}" to Web Site</div>
+                <div class="dialog-content publication-content">
+                    
+                    ${publicationSummary}
+                    ${validationStatus}
+                    
+                    <div class="form-section">
+                        <h3>Publication Settings</h3>
+                        
+                        <div class="form-group-inline">
+                            <label for="pub-website-folder">Web Site Folder:</label>
+                            <div class="input-with-button">
+                                <input type="text" id="pub-website-folder" value="${settings.websiteFolder}" 
+                                       placeholder="Folder containing website source for publishing IGs">
+                                <button type="button" id="browse-website-folder">Browse...</button>
+                            </div>
+                        </div>
+                        
+                        <div class="form-group-inline">
+                            <label for="pub-registry-file">Registry File:</label>
+                            <div class="input-with-button">
+                                <input type="text" id="pub-registry-file" value="${settings.registryFile}" 
+                                       placeholder="Full path to fhir-ig-list.json file">
+                                <button type="button" id="browse-registry-file">Browse...</button>
+                            </div>
+                        </div>                        
+                        <div class="form-group-inline">
+                            <label for="pub-history-templates">History Templates:</label>
+                            <div class="input-with-button">
+                                <input type="text" id="pub-history-templates" value="${settings.historyTemplates}" 
+                                       placeholder="Folder containing history templates">
+                                <button type="button" id="browse-history-templates">Browse...</button>
+                            </div>
+                        </div>
+                        
+                        <div class="form-group-inline">
+                            <label for="pub-web-templates">Web Templates:</label>
+                            <div class="input-with-button">
+                                <input type="text" id="pub-web-templates" value="${settings.webTemplates}" 
+                                       placeholder="Folder containing search page templates">
+                                <button type="button" id="browse-web-templates">Browse...</button>
+                            </div>
+                        </div>
+                        
+                        <div class="form-group-inline">
+                            <label for="pub-zip-archive">Zip Archive Folder:</label>
+                            <div class="input-with-button">
+                                <input type="text" id="pub-zip-archive" value="${settings.zipArchive}" 
+                                       placeholder="Folder where publication archives will be stored">
+                                <button type="button" id="browse-zip-archive">Browse...</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="dialog-buttons-with-docs">
+                    <div class="documentation-links-inline">
+                        <span style="font-weight: 500; color: #666;">Documentation:</span>
+                        <a href="#" data-url="https://build.fhir.org/ig/ElliotSilver/how-to-publish/publication.html" class="doc-link">Publishing Guide</a>
+                        <a href="#" data-url="https://confluence.hl7.org/spaces/FHIR/pages/144970227/IG+Publication+Request+Documentation" class="doc-link">Publication Request Docs</a>
+                    </div>
+                    <div class="dialog-buttons-right">
+                        <button onclick="resolvePublishDialog('cancel')" class="btn-cancel">Cancel</button>
+                        <button onclick="resolvePublishDialog('go')" class="btn-go" ${validation.success ? '' : 'disabled'}>Go</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// 11. ADD function to create publication summary
+function createPublicationSummary(validation) {
+    if (!validation.publicationRequest) {
+        return '<div class="publication-summary"><h3>Publication Request</h3><p>Could not load publication request data.</p></div>';
+    }
+
+    const pub = validation.publicationRequest;
+
+    return `
+        <div class="publication-summary">
+            <h3>Publication Request Summary</h3>
+            <div class="publication-info">
+                <span class="label">Package:</span>
+                <span class="value">${pub.packageId || pub['package-id'] || 'Not specified'}#${pub.version || pub['ig-version'] || 'Not specified'} in Sequence ${pub.sequence || 'Not specified'}</span>
+                <span class="label">Publish:</span>
+                <span class="value">as ${pub.status || 'Not specified'}/${pub.mode || 'Not specified'} to ${pub.path || 'Not specified'}</span>
+                <span class="label">Description:</span>
+                <span class="value">${pub.desc || pub.descmd || 'Not specified'}</span>
+            </div>
+        </div>
+    `;
+}
+
+// 12. ADD function to create validation status
+function createValidationStatus(validation) {
+    const statusClass = validation.success ? 'validation-success' :
+      validation.messages.some(m => m.startsWith('✗')) ? 'validation-error' : 'validation-warning';
+
+    const messages = validation.messages.map(msg => `<div>${msg}</div>`).join('');
+
+    return `
+        <div class="validation-status ${statusClass}">
+            <strong>Validation Status:</strong>
+            ${messages}
+        </div>
+    `;
+}
+
+// 13. ADD function to setup dialog event listeners
+function setupPublishDialogListeners(dialog) {
+    // Browse buttons - ALL use 'select-folder' since that's what's available
+    const browseButtons = [
+        { id: 'browse-website-folder', inputId: 'pub-website-folder' },
+        { id: 'browse-registry-file', inputId: 'pub-registry-file' },
+        { id: 'browse-history-templates', inputId: 'pub-history-templates' },
+        { id: 'browse-web-templates', inputId: 'pub-web-templates' },
+        { id: 'browse-zip-archive', inputId: 'pub-zip-archive' }
+    ];
+
+    browseButtons.forEach(button => {
+        const btn = dialog.querySelector('#' + button.id);
+        const input = dialog.querySelector('#' + button.inputId);
+
+        if (btn && input) {
+            btn.addEventListener('click', async function() {
+                try {
+                    // Use select-folder for all selections
+                    const result = await ipcRenderer.invoke('select-folder');
+
+                    if (!result.canceled && result.filePaths.length > 0) {
+                        const selectedPath = result.filePaths[0];
+
+                        // For registry file, append the expected filename if it exists
+                        if (button.id === 'browse-registry-file') {
+                            const registryPath = path.join(selectedPath, 'fhir-ig-list.json');
+                            if (fs.existsSync(registryPath)) {
+                                input.value = registryPath;
+                            } else {
+                                // Let user specify the full path manually
+                                input.value = selectedPath;
+                                // Show a helpful message
+                                setTimeout(() => {
+                                    alert('fhir-ig-list.json not found in selected folder.\nPlease manually add the filename to the path.');
+                                }, 100);
+                            }
+                        } else {
+                            input.value = selectedPath;
+                        }
+                    }
+                } catch (error) {
+                    console.log('Error selecting folder:', error);
+                    appendToBuildOutput('Error selecting folder: ' + error.message);
+                }
+            });
+        }
+    });
+
+    // Documentation links
+    const docLinks = dialog.querySelectorAll('.doc-link');
+    docLinks.forEach(link => {
+        link.addEventListener('click', async function(e) {
+            e.preventDefault();
+            const url = this.getAttribute('data-url');
+            if (url) {
+                try {
+                    await ipcRenderer.invoke('open-external', url);
+                } catch (error) {
+                    console.log('Failed to open documentation:', error);
+                }
+            }
+        });
+    });
 }
