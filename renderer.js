@@ -429,12 +429,15 @@ function appendToIgConsole(ig, text) {
 
 function updateBuildOutputDisplay() {
     const ig = getSelectedIg();
+    const buildOutputHeader = document.querySelector('.build-output-header');
     if (ig && buildOutput) {
         initializeIgConsole(ig);
         buildOutput.textContent = ig.console;
         buildOutput.scrollTop = buildOutput.scrollHeight;
+        buildOutputHeader.textContent = 'Build Output - ' + ig.name;
     } else if (buildOutput) {
         buildOutput.textContent = 'No IG selected';
+        buildOutputHeader.textContent = 'Build Output';
     }
 }
 
@@ -1667,7 +1670,8 @@ async function buildCopyMenuItems(ig) {
         items.push({
             action: 'copy-package-id',
             label: 'Package ID',
-            value: packageInfo.fullPackageId
+            value: packageInfo.fullPackageId,
+            icon: '📦'
         });
     } catch (error) {
         // Package ID not available
@@ -1680,7 +1684,8 @@ async function buildCopyMenuItems(ig) {
             items.push({
                 action: 'copy-github-url',
                 label: 'GitHub Repository URL',
-                value: gitUrl
+                value: gitUrl,
+                icon: '🔗'
             });
         }
     } catch (error) {
@@ -1691,14 +1696,16 @@ async function buildCopyMenuItems(ig) {
     items.push({
         action: 'copy-build-log',
         label: 'Last Build Log',
-        value: ig.console
+        value: ig.console,
+        icon: '📃'
     });
 
     const jekyllCommand = 'cd "' + path.join(ig.folder, 'temp', 'pages') + '" && jekyll build --destination "' + path.join(ig.folder, 'output') + '"';
     items.push({
         action: 'copy-jekyll-command',
         label: 'Jekyll Command',
-        value: jekyllCommand
+        value: jekyllCommand,
+        icon: '⚙️'
     });
 
     return items;
