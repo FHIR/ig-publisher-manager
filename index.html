@@ -369,11 +369,13 @@
         .ig-list {
             flex: 1;
             overflow: auto;
+            max-height: 100%;
         }
 
         .ig-list table {
             width: 100%;
             border-collapse: collapse;
+            table-layout: fixed;
         }
 
         .ig-list th {
@@ -386,6 +388,8 @@
             border-bottom: 1px solid #ddd;
             position: sticky;
             top: 0;
+            z-index: 10; /* Ensure headers stay above content when scrolling */
+            box-shadow: 0 1px 1px rgba(0,0,0,0.1); /* Add subtle shadow for visual separation */
         }
 
         .ig-list td {
