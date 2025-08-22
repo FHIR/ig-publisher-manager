@@ -36,9 +36,15 @@ function createWindow() {
           click: () => mainWindow.webContents.send('menu-add-folder')
         },
         {
-          label: 'Add from GitHub...',
+          label: 'Add from Git Server...',
           accelerator: 'CmdOrCtrl+G',
           click: () => mainWindow.webContents.send('menu-add-github')
+        },
+        { type: 'separator' },
+        {
+          label: 'Search in Files...',
+          accelerator: 'CmdOrCtrl+Shift+F',
+          click: () => mainWindow.webContents.send('menu-search')
         },
         { type: 'separator' },
         {
