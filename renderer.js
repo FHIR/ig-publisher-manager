@@ -2,12 +2,20 @@ const ipcRenderer = require('electron').ipcRenderer;
 const fs = require('fs');
 const path = require('path');
 
+
 // Application state
 let igList = [];
 let selectedIgIndex = -1;
 let optionsPanelVisible = false;
 let buildProcesses = new Map();
 let fileWatcher = null;
+let searchPanel = null;
+let searchPanelVisible = false;
+let igSearch = null;
+let currentSearchState = null;
+let searchPanelWidth = 400; // Default width
+let isResizingSearchPanel = false;
+let previousSelectedIgIndex = -1;
 
 // Sort state
 let sortState = {
@@ -456,7 +464,10 @@ document.addEventListener('DOMContentLoaded', function() {
     setupContextMenus();
     setupResizer();
     setupBuildOutput();
-    
+
+    // Initialize search functionality
+    initializeSearch();
+
     // Load data
     loadSettings();
     loadIgList();
@@ -603,7 +614,7 @@ function buildIgPublisherCommand(ig, jarPath) {
 function setupEventListeners() {
     // Toolbar buttons
     document.getElementById('btn-add-folder').addEventListener('click', addFolder);
-    document.getElementById('btn-add-github').addEventListener('click', addFromGitHub);
+    document.getElementById('btn-add-github').addEventListener('click', addFromGit);
     document.getElementById('btn-delete').addEventListener('click', deleteIg);
     document.getElementById('btn-build').addEventListener('click', buildIg);
     document.getElementById('btn-stop').addEventListener('click', stopBuild);
@@ -613,6 +624,10 @@ function setupEventListeners() {
     document.getElementById('btn-update').addEventListener('click', updateSource);
     document.getElementById('btn-tools').addEventListener('click', showToolsMenu);
     document.getElementById('btn-toggle-options').addEventListener('click', toggleOptionsPanel);
+    const searchBtn = document.getElementById('btn-search');
+    if (searchBtn) {
+        searchBtn.addEventListener('click', toggleSearchPanel);
+    }
 
     // Settings change listeners
     document.getElementById('terminology-server').addEventListener('change', saveSettings);
@@ -728,29 +743,52 @@ function updateIgList() {
     sortIgList();
 
     igListBody.innerHTML = '';
-    
+
     for (let i = 0; i < igList.length; i++) {
         const ig = igList[i];
         const row = document.createElement('tr');
         if (i === selectedIgIndex) {
             row.classList.add('selected');
         }
-        
+        // Check if IG was added in the last 30 minutes
+        if (ig.addedTimestamp && isNewlyAdded(ig.addedTimestamp)) {
+            row.classList.add('newly-added');
+        }
+
         const index = i; // Capture for closure
         row.addEventListener('click', function() {
+            // Save current search state before switching
+            if (searchPanelVisible && previousSelectedIgIndex !== -1 && previousSelectedIgIndex !== index) {
+                saveCurrentSearchState();
+            }
+
+            previousSelectedIgIndex = selectedIgIndex; // Track previous selection
             selectedIgIndex = index;
             updateIgList();
             updateBuildOutputDisplay();
             updateButtonStates();
+
+            // Update search for the newly selected IG
+            updateSearchForSelectedIg();
         });
 
         // Right click - show context menu
         row.addEventListener('contextmenu', function(e) {
             e.preventDefault();
+
+            // Save current search state before switching
+            if (searchPanelVisible && previousSelectedIgIndex !== -1 && previousSelectedIgIndex !== index) {
+                saveCurrentSearchState();
+            }
+
+            previousSelectedIgIndex = selectedIgIndex; // Track previous selection
             selectedIgIndex = index; // Select the row that was right-clicked
             updateIgList();
             updateBuildOutputDisplay();
             updateButtonStates();
+
+            // Update search for the newly selected IG
+            updateSearchForSelectedIg();
             showIgContextMenu(e);
         });
 
@@ -776,16 +814,16 @@ function updateIgList() {
 
         const lastBuildDisplay = formatRelativeTime(ig.lastBuildStart);
 
-        row.innerHTML = 
-            '<td>' + ig.name + '</td>' +
-            '<td>' + ig.version + '</td>' +
-            '<td>' + gitBranchDisplay + '</td>' +
-            '<td>' + ig.folder + '</td>' +
-            '<td><span class="status-badge ' + statusClass + '">' + (ig.buildStatus || 'Not Built') + '</span></td>' +
-            '<td>' + (ig.buildTime || '-') + '</td>' +
-            '<td>' + (ig.builtSize || '-') + '</td>' +
+        row.innerHTML =
+          '<td>' + ig.name + '</td>' +
+          '<td>' + ig.version + '</td>' +
+          '<td>' + gitBranchDisplay + '</td>' +
+          '<td>' + ig.folder + '</td>' +
+          '<td><span class="status-badge ' + statusClass + '">' + (ig.buildStatus || 'Not Built') + '</span></td>' +
+          '<td>' + (ig.buildTime || '-') + '</td>' +
+          '<td>' + (ig.builtSize || '-') + '</td>' +
           '<td>' + lastBuildDisplay + '</td>';
-        
+
         igListBody.appendChild(row);
     }
 
@@ -793,10 +831,18 @@ function updateIgList() {
 
     // Auto-select first item if none selected
     if (selectedIgIndex === -1 && igList.length > 0) {
+        previousSelectedIgIndex = selectedIgIndex;
         selectedIgIndex = 0;
         updateBuildOutputDisplay();
         updateButtonStates();
+        updateSearchForSelectedIg();
     }
+}
+
+function isNewlyAdded(addedTimestamp) {
+    if (!addedTimestamp) return false;
+    const thirtyMinutesInMs = 30 * 60 * 1000; // 30 minutes in milliseconds
+    return (Date.now() - addedTimestamp) < thirtyMinutesInMs;
 }
 
 function getStatusClass(status) {
@@ -1091,7 +1137,8 @@ async function addIgFromFolder(folderPath) {
             buildStatus: 'Not Built',
             buildTime: '-',
             builtSize: '-',
-            console: ''
+            console: '',
+            addedTimestamp: Date.now()
         };
 
         igList.push(newIg);
@@ -1182,6 +1229,9 @@ function buildIg() {
         appendToBuildOutput('Build already in progress for ' + ig.name);
         return;
     }
+
+    // Clear search output results when build starts
+    clearSearchOutputResults();
 
     ig.lastBuildStart = Date.now();
 
@@ -2075,7 +2125,8 @@ function saveIgList() {
                 buildStatus: ig.buildStatus,
                 buildTime: ig.buildTime,
                 builtSize: ig.builtSize,
-                lastBuildStart: ig.lastBuildStart
+                lastBuildStart: ig.lastBuildStart,
+                addedTimestamp: ig.addedTimestamp
                 // Don't save console data
             };
             igListToSave.push(savedIg);
@@ -2245,38 +2296,36 @@ function loadSavedPublisherVersions() {
 
 
 // GitHub dialog and functionality
-async function addFromGitHub() {
+async function addFromGit() {
     // Try to auto-populate from clipboard when dialog opens
     let clipboardData = null;
     try {
         const clipboardText = await navigator.clipboard.readText();
-        clipboardData = parseGitHubUrl(clipboardText, false); // false = don't show errors
+        clipboardData = parseGitUrl(clipboardText, false); // false = don't show errors
     } catch (error) {
         // Clipboard access failed or parsing failed - that's okay
     }
 
-    const result = await showGitHubDialog(clipboardData);
+    const result = await showGitDialog(clipboardData);
 
     if (result && result !== 'cancel') {
-        await cloneGitHubRepository(result);
+        await cloneGitRepository(result);
     }
 }
 
-function showGitHubDialog(initialData) {
+function showGitDialog(initialData) {
     return new Promise(function(resolve) {
         // Get saved base folder
-        const savedBaseFolder = localStorage.getItem('githubBaseFolder') || '';
+        const savedBaseFolder = localStorage.getItem('gitBaseFolder') || '';
+
+        const serverTypeDisplay = initialData ? ` (${getServerDisplayName(initialData.serverType)})` : '';
 
         const dialog = document.createElement('div');
         dialog.innerHTML =
           '<div class="dialog-overlay">' +
           '<div class="dialog">' +
-          '<div class="dialog-header">Add Implementation Guide from GitHub</div>' +
+          '<div class="dialog-header">Add IG from Git Repository' + serverTypeDisplay + '</div>' +
           '<div class="dialog-content">' +
-          '<div class="paste-section">' +
-          '<button id="paste-btn" class="btn-paste">Paste from Clipboard</button>' +
-          '<div id="paste-error" class="paste-error" style="display: none;"></div>' +
-          '</div>' +
           '<div class="form-group">' +
           '<label for="base-folder">Base Folder</label>' +
           '<div style="display: flex; gap: 8px;">' +
@@ -2285,7 +2334,7 @@ function showGitHubDialog(initialData) {
           '</div>' +
           '</div>' +
           '<div class="form-group">' +
-          '<label for="git-org">Organization</label>' +
+          '<label for="git-org">Organization/User</label>' +
           '<input type="text" id="git-org" value="' + (initialData?.org || '') + '" placeholder="e.g., HL7">' +
           '</div>' +
           '<div class="form-group">' +
@@ -2296,50 +2345,195 @@ function showGitHubDialog(initialData) {
           '<label for="git-branch">Branch</label>' +
           '<input type="text" id="git-branch" value="' + (initialData?.branch || 'main') + '" placeholder="main">' +
           '</div>' +
+          '<div class="form-group">' +
+          '<label for="git-server">Git Server URL (optional)</label>' +
+          '<input type="text" id="git-server" value="' + (initialData?.baseUrl || '') + '" placeholder="Leave blank for GitHub (https://github.com)">' +
+          '</div>' +
+          '<div id="paste-error" class="paste-error" style="display: none;"></div>' +
           '</div>' +
           '<div class="dialog-buttons">' +
-          '<button onclick="resolveGitHubDialog(\'cancel\')" class="btn-cancel">Cancel</button>' +
-          '<button onclick="resolveGitHubDialog(\'ok\')" class="btn-ok">Clone Repository</button>' +
+          '<button id="paste-btn" class="btn-paste">Paste from Clipboard</button>' +
+          '<div style="flex: 1;"></div>' +
+          '<button id="cancel-btn" class="btn-cancel">Cancel</button>' +
+          '<button id="clone-btn" class="btn-ok">Clone Repository</button>' +
           '</div>' +
           '</div>' +
           '</div>';
 
-        // Add resolver function to window
-        window.resolveGitHubDialog = function(action) {
-            if (action === 'ok') {
-                const baseFolder = document.getElementById('base-folder').value.trim();
-                const org = document.getElementById('git-org').value.trim();
-                const repo = document.getElementById('git-repo').value.trim();
-                const branch = document.getElementById('git-branch').value.trim();
-
-                if (!baseFolder || !org || !repo || !branch) {
-                    alert('Please fill in all fields');
-                    return;
-                }
-
-                // Save base folder for next time
-                localStorage.setItem('githubBaseFolder', baseFolder);
-
-                document.body.removeChild(dialog);
-                delete window.resolveGitHubDialog;
-                resolve({
-                    baseFolder: baseFolder,
-                    org: org,
-                    repo: repo,
-                    branch: branch
-                });
-            } else {
-                document.body.removeChild(dialog);
-                delete window.resolveGitHubDialog;
-                resolve('cancel');
-            }
-        };
-
         document.body.appendChild(dialog);
 
         // Set up event listeners for the dialog
-        setupGitHubDialogListeners(dialog);
+        setupGitDialogListeners(dialog, resolve, initialData);
     });
+}
+
+function setupGitDialogListeners(dialog, resolve, initialData) {
+    // Browse base folder button
+    const browseBtn = dialog.querySelector('#browse-base-folder');
+    const baseFolderInput = dialog.querySelector('#base-folder');
+
+    if (browseBtn && baseFolderInput) {
+        browseBtn.addEventListener('click', async function(e) {
+            e.preventDefault();
+            try {
+                console.log('Browse button clicked');
+                const result = await ipcRenderer.invoke('select-folder');
+                console.log('Folder selection result:', result);
+
+                if (!result.canceled && result.filePaths.length > 0) {
+                    baseFolderInput.value = result.filePaths[0];
+                    console.log('Set base folder to:', result.filePaths[0]);
+                }
+            } catch (error) {
+                console.log('Error selecting folder:', error);
+                alert('Error selecting folder: ' + error.message);
+            }
+        });
+    }
+
+    // Paste button
+    const pasteBtn = dialog.querySelector('#paste-btn');
+    const pasteError = dialog.querySelector('#paste-error');
+
+    if (pasteBtn) {
+        pasteBtn.addEventListener('click', async function(e) {
+            e.preventDefault();
+            try {
+                console.log('Paste button clicked');
+
+                // Clear any previous error
+                if (pasteError) {
+                    pasteError.style.display = 'none';
+                }
+
+                const clipboardText = await navigator.clipboard.readText();
+                console.log('Clipboard text:', clipboardText);
+
+                const parsed = parseGitUrl(clipboardText, true);
+                console.log('Parsed URL:', parsed);
+
+                if (parsed) {
+                    const orgInput = dialog.querySelector('#git-org');
+                    const repoInput = dialog.querySelector('#git-repo');
+                    const branchInput = dialog.querySelector('#git-branch');
+                    const serverInput = dialog.querySelector('#git-server');
+
+                    if (orgInput) orgInput.value = parsed.org;
+                    if (repoInput) repoInput.value = parsed.repo;
+                    if (branchInput) branchInput.value = parsed.branch;
+                    if (serverInput) serverInput.value = parsed.baseUrl || '';
+
+                    // Try to get the actual default branch from GitHub
+                    if (parsed.serverType === 'github') {
+                        try {
+                            const defaultBranch = await getGitHubDefaultBranch(parsed.org, parsed.repo);
+                            if (defaultBranch && parsed.branch === 'main') {
+                                if (branchInput) branchInput.value = defaultBranch;
+                            }
+                        } catch (error) {
+                            console.log('Could not get default branch:', error);
+                        }
+                    }
+
+                    // Visual feedback
+                    pasteBtn.style.backgroundColor = '#28a745';
+                    pasteBtn.textContent = 'Pasted!';
+                    setTimeout(() => {
+                        pasteBtn.style.backgroundColor = '';
+                        pasteBtn.textContent = 'Paste from Clipboard';
+                    }, 1500);
+                } else {
+                    throw new Error('Could not parse Git URL from clipboard');
+                }
+            } catch (error) {
+                console.log('Paste error:', error);
+                if (pasteError) {
+                    pasteError.textContent = 'Paste failed: ' + error.message;
+                    pasteError.style.display = 'block';
+                }
+            }
+        });
+    }
+
+    // Cancel button
+    const cancelBtn = dialog.querySelector('#cancel-btn');
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            console.log('Cancel button clicked');
+            document.body.removeChild(dialog);
+            resolve('cancel');
+        });
+    }
+
+    // Clone button - this is the important one that wasn't working
+    const cloneBtn = dialog.querySelector('#clone-btn');
+    if (cloneBtn) {
+        cloneBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            console.log('Clone button clicked');
+
+            const baseFolder = document.getElementById('base-folder').value.trim();
+            const org = document.getElementById('git-org').value.trim();
+            const repo = document.getElementById('git-repo').value.trim();
+            const branch = document.getElementById('git-branch').value.trim();
+            const gitServer = document.getElementById('git-server').value.trim();
+
+            console.log('Form values:', { baseFolder, org, repo, branch, gitServer });
+
+            if (!baseFolder || !org || !repo || !branch) {
+                alert('Please fill in all required fields');
+                return;
+            }
+
+            // Save base folder for next time
+            localStorage.setItem('gitBaseFolder', baseFolder);
+
+            console.log('Removing dialog and resolving with config');
+            document.body.removeChild(dialog);
+            resolve({
+                baseFolder: baseFolder,
+                org: org,
+                repo: repo,
+                branch: branch,
+                gitServer: gitServer || 'https://github.com',
+                serverType: initialData?.serverType || 'github'
+            });
+        });
+    } else {
+        console.log('Clone button not found!');
+    }
+
+    // Also handle Enter key in form fields
+    const inputs = dialog.querySelectorAll('input');
+    inputs.forEach(input => {
+        input.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                cloneBtn.click();
+            }
+        });
+    });
+
+    // Handle Escape key to cancel
+    dialog.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            cancelBtn.click();
+        }
+    });
+}
+
+function getServerDisplayName(serverType) {
+    const names = {
+        'github': 'GitHub',
+        'gitlab': 'GitLab',
+        'bitbucket': 'Bitbucket',
+        'azure': 'Azure DevOps',
+        'build.fhir.org': 'FHIR Build Server',
+        'generic': 'Git Server'
+    };
+    return names[serverType] || 'Git Server';
 }
 
 function setupGitHubDialogListeners(dialog) {
@@ -2389,8 +2583,7 @@ function setupGitHubDialogListeners(dialog) {
     });
 }
 
-// Convert the Pascal parsing logic to JavaScript
-function parseGitHubUrl(url, showError) {
+function parseGitUrl(url, showError) {
     try {
         if (!url || typeof url !== 'string') {
             throw new Error('Not a valid URL');
@@ -2406,46 +2599,121 @@ function parseGitHubUrl(url, showError) {
         let branch = 'main'; // Default to 'main' instead of 'master'
         let org = '';
         let repo = '';
+        let serverType = 'unknown';
+        let baseUrl = '';
 
         const parts = url.split('/');
 
         // Parse build.fhir.org URLs: https://build.fhir.org/ig/org/repo/branches/branch
-        if (parts.length > 5 && (url.startsWith('https://build.fhir.org/ig') || url.startsWith('http://build.fhir.org/ig'))) {
-            org = parts[4];
-            repo = parts[5];
+        // Note: These typically map to GitHub repositories
+        if (url.includes('build.fhir.org/ig')) {
+            const igIndex = parts.findIndex(part => part === 'ig');
+            if (igIndex >= 0 && parts.length > igIndex + 2) {
+                org = parts[igIndex + 1];
+                repo = parts[igIndex + 2];
+                serverType = 'build.fhir.org';
+                baseUrl = 'https://github.com'; // Most build.fhir.org IGs are on GitHub
 
-            if (parts.length >= 8) {
-                if (parts[6] !== 'branches') {
-                    throw new Error('Unable to understand IG location: ' + url);
-                } else {
-                    branch = parts[7];
+                // Check for branch specification
+                if (parts.length > igIndex + 4 && parts[igIndex + 3] === 'branches') {
+                    branch = parts[igIndex + 4];
                 }
+            } else {
+                throw new Error('Unable to parse build.fhir.org IG URL: ' + url);
             }
         }
         // Parse GitHub URLs: https://github.com/org/repo/tree/branch or https://github.com/org/repo/blob/branch
         else if (parts.length > 4 && (url.startsWith('https://github.com/') || url.startsWith('http://github.com/'))) {
             org = parts[3];
             repo = parts[4];
+            serverType = 'github';
+            baseUrl = parts[0] + '//' + parts[2]; // https://github.com
 
             if (parts.length > 6) {
-                if (parts[5] === 'tree' || parts[5] === 'blob') {
+                if (parts[5] === 'tree' || parts[5] === 'blob' || parts[5] === '-' || parts[5] === 'src') {
                     branch = parts[6];
                 } else {
-                    throw new Error('Unable to understand IG location: ' + url);
+                    throw new Error('Unable to understand Git repository location: ' + url);
                 }
             }
-        } else {
-            throw new Error('URL must be from github.com or build.fhir.org');
+        }
+        // Parse GitLab URLs: https://gitlab.com/org/repo/-/tree/branch or https://gitlab.com/org/repo/-/blob/branch
+        else if (parts.length > 4 && (url.includes('gitlab'))) {
+            org = parts[3];
+            repo = parts[4];
+            serverType = 'gitlab';
+            baseUrl = parts[0] + '//' + parts[2]; // https://gitlab.com or custom instance
+
+            if (parts.length > 7) {
+                if (parts[5] === '-' && (parts[6] === 'tree' || parts[6] === 'blob')) {
+                    branch = parts[7];
+                }
+            } else if (parts.length > 6) {
+                if (parts[5] === 'tree' || parts[5] === 'blob') {
+                    branch = parts[6];
+                }
+            }
+        }
+        // Parse Bitbucket URLs: https://bitbucket.org/org/repo/src/branch
+        else if (parts.length > 4 && (url.includes('bitbucket'))) {
+            org = parts[3];
+            repo = parts[4];
+            serverType = 'bitbucket';
+            baseUrl = parts[0] + '//' + parts[2]; // https://bitbucket.org
+
+            if (parts.length > 6) {
+                if (parts[5] === 'src') {
+                    branch = parts[6];
+                }
+            }
+        }
+        // Parse Azure DevOps URLs: https://dev.azure.com/org/project/_git/repo?version=GBbranch
+        else if (parts.length > 4 && (url.includes('dev.azure.com') || url.includes('visualstudio.com'))) {
+            org = parts[3];
+            const project = parts[4];
+            repo = parts[6]; // After _git/
+            serverType = 'azure';
+            baseUrl = parts[0] + '//' + parts[2];
+
+            // Handle Azure DevOps branch in query parameter
+            const versionMatch = url.match(/[?&]version=GB([^&]+)/);
+            if (versionMatch) {
+                branch = versionMatch[1];
+            }
+
+            // Combine org and project for display
+            org = `${org}/${project}`;
+        }
+        // Generic Git server support
+        else if (parts.length > 4 && (url.includes('.git') || url.includes('/tree/') || url.includes('/blob/'))) {
+            org = parts[3];
+            repo = parts[4];
+            serverType = 'generic';
+            baseUrl = parts[0] + '//' + parts[2];
+
+            // Try to extract branch
+            for (let i = 5; i < parts.length - 1; i++) {
+                if (parts[i] === 'tree' || parts[i] === 'blob' || parts[i] === 'src') {
+                    branch = parts[i + 1];
+                    break;
+                }
+            }
+        }
+        else {
+            throw new Error('URL must be from a supported Git server (GitHub, GitLab, Bitbucket, Azure DevOps, or build.fhir.org)');
         }
 
         if (!org || !repo) {
-            throw new Error('Unable to understand IG location: ' + url);
+            throw new Error('Unable to understand repository location: ' + url);
         }
 
         return {
             org: org,
             repo: repo,
-            branch: branch
+            branch: branch,
+            serverType: serverType,
+            baseUrl: baseUrl,
+            originalUrl: url
         };
 
     } catch (error) {
@@ -2484,16 +2752,16 @@ async function getGitHubDefaultBranch(org, repo) {
 }
 
 // Clone the repository
-async function cloneGitHubRepository(config) {
-    const { baseFolder, org, repo, branch } = config;
+async function cloneGitRepository(config) {
+    const { baseFolder, org, repo, branch, gitServer, serverType } = config;
 
-    // Create target folder name: org-repo-branch
-    const folderName = `${org}-${repo}-${branch}`;
-    const targetPath = path.join(baseFolder, folderName);
+    // Create target folder name: org-repo-branch (replace / with -)
+    const safeName = `${org.replace(/\//g, '-')}-${repo}-${branch}`;
+    const targetPath = path.join(baseFolder, safeName);
 
     // Check if folder already exists
     if (fs.existsSync(targetPath)) {
-        const overwrite = confirm(`Folder "${folderName}" already exists. Overwrite?`);
+        const overwrite = confirm(`Folder "${safeName}" already exists. Overwrite?`);
         if (!overwrite) {
             appendToBuildOutput('Clone cancelled - folder already exists');
             return;
@@ -2507,7 +2775,23 @@ async function cloneGitHubRepository(config) {
         }
     }
 
-    appendToBuildOutput(`Cloning ${org}/${repo} (${branch}) to ${targetPath}...`);
+    // Construct the appropriate Git URL based on server type
+    let gitUrl;
+    let actualServerType = serverType;
+    let actualBaseUrl = gitServer;
+
+    // Special handling for build.fhir.org - these are typically GitHub repos
+    if (serverType === 'build.fhir.org') {
+        gitUrl = `https://github.com/${org}/${repo}.git`;
+        actualServerType = 'github';
+        actualBaseUrl = 'https://github.com';
+    } else if (serverType === 'azure') {
+        gitUrl = `${gitServer}/${org}/_git/${repo}`;
+    } else {
+        gitUrl = `${gitServer}/${org}/${repo}.git`;
+    }
+
+    appendToBuildOutput(`Cloning ${org}/${repo} (${branch}) from ${getServerDisplayName(serverType)} to ${targetPath}...`);
 
     try {
         // Create a temporary IG entry for console output
@@ -2519,20 +2803,35 @@ async function cloneGitHubRepository(config) {
 
         resetIgConsole(tempIg, 'Git Clone');
 
-        const gitUrl = `https://github.com/${org}/${repo}.git`;
+        appendToIgConsole(tempIg, `Server: ${getServerDisplayName(serverType)}`);
         appendToIgConsole(tempIg, `Cloning from: ${gitUrl}`);
         appendToIgConsole(tempIg, `Branch: ${branch}`);
         appendToIgConsole(tempIg, `Target: ${targetPath}`);
 
-        await runGitClone(tempIg, gitUrl, targetPath, branch);
+        // Try to get the actual default branch before cloning
+        if (branch === 'main' || branch === 'master') {
+            appendToIgConsole(tempIg, 'Checking for actual default branch...');
+            const defaultBranch = await getDefaultBranch(org, repo, actualServerType, actualBaseUrl);
+            if (defaultBranch && defaultBranch !== branch) {
+                appendToIgConsole(tempIg, `Found default branch: ${defaultBranch} (instead of ${branch})`);
+                // Update the config to use the correct branch
+                config.branch = defaultBranch;
+            } else if (defaultBranch) {
+                appendToIgConsole(tempIg, `Confirmed default branch: ${defaultBranch}`);
+            } else {
+                appendToIgConsole(tempIg, `Could not determine default branch, using: ${branch}`);
+            }
+        }
+
+        await runGitClone(tempIg, gitUrl, targetPath, config.branch);
 
         // Add the cloned repository to our IG list
         await addIgFromFolder(targetPath);
 
-        appendToIgConsole(tempIg, '✓ Repository cloned and added successfully');
+        appendToIgConsole(tempIg, '✅ Repository cloned and added successfully');
 
     } catch (error) {
-        appendToBuildOutput('✗ Clone failed: ' + error.message);
+        appendToBuildOutput('❌ Clone failed: ' + error.message);
     }
 }
 
@@ -2673,6 +2972,31 @@ function setupResizer() {
         }
     });
 
+    document.addEventListener('keydown', function(e) {
+        // Ctrl+Shift+F or Cmd+Shift+F for search
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'F') {
+            e.preventDefault();
+            showSearchPanel();
+        }
+
+        // F5 for build
+        if (e.key === 'F5') {
+            e.preventDefault();
+            const ig = getSelectedIg();
+            if (ig && !buildProcesses.has(selectedIgIndex)) {
+                buildIg();
+            }
+        }
+
+        // Escape to close any open dialogs/panels
+        if (e.key === 'Escape') {
+            closeContextMenus();
+            if (searchPanelVisible) {
+                hideSearchPanel();
+            }
+        }
+    });
+
     // Handle cursor change on hover
     resizer.addEventListener('mouseenter', function() {
         if (!isResizing) {
@@ -2685,6 +3009,60 @@ function setupResizer() {
             resizer.style.background = '#ddd';
         }
     });
+}
+
+async function getDefaultBranch(org, repo, serverType, baseUrl) {
+    try {
+        let apiUrl = '';
+
+        switch (serverType) {
+            case 'github':
+            case 'build.fhir.org': // build.fhir.org IGs are typically on GitHub
+                apiUrl = `https://api.github.com/repos/${org}/${repo}`;
+                break;
+            case 'gitlab':
+                // For GitLab, the API is different
+                const projectPath = encodeURIComponent(`${org}/${repo}`);
+                if (baseUrl.includes('gitlab.com')) {
+                    apiUrl = `https://gitlab.com/api/v4/projects/${projectPath}`;
+                } else {
+                    // Custom GitLab instance
+                    apiUrl = `${baseUrl}/api/v4/projects/${projectPath}`;
+                }
+                break;
+            default:
+                // For other servers, we can't reliably get the default branch via API
+                return null;
+        }
+
+        console.log(`Fetching default branch from: ${apiUrl}`);
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+        const response = await fetch(apiUrl, {
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'IG-Publisher-Manager'
+            },
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            throw new Error(`API responded with ${response.status}: ${response.statusText}`);
+        }
+
+        const repoInfo = await response.json();
+
+        // GitHub and GitLab both use 'default_branch' field
+        return repoInfo.default_branch;
+
+    } catch (error) {
+        console.log(`Failed to get default branch for ${org}/${repo}:`, error);
+        return null; // Return null instead of throwing, so we can fall back to the guessed branch
+    }
 }
 
 // Function to restore saved heights
@@ -2840,6 +3218,7 @@ function closeContextMenus() {
     const toolsMenu = document.getElementById('tools-menu');
     const igContextMenu = document.getElementById('ig-context-menu');
     const buildOutputContextMenu = document.getElementById('build-output-context-menu');
+    const searchContextMenu = document.getElementById('search-context-menu');
 
     if (copyMenu) copyMenu.style.display = 'none';
     if (toolsMenu) toolsMenu.style.display = 'none';
@@ -2847,6 +3226,7 @@ function closeContextMenus() {
     if (buildOutputContextMenu) buildOutputContextMenu.style.display = 'none';
     const documentationMenu = document.getElementById('documentation-menu');
     if (documentationMenu) documentationMenu.style.display = 'none';
+    if (searchContextMenu) searchContextMenu.style.display = 'none';
 
 }
 
@@ -3535,6 +3915,18 @@ function updateToolsMenuStates(canPublishToWebsite) {
 
 // 4. ADD function to load publication settings
 function loadPublicationSettings() {
+    const mostRecent = getMostRecentTarget();
+    if (mostRecent) {
+        return {
+            websiteFolder: mostRecent.websiteFolder || '',
+            registryFile: mostRecent.registryFile || '',
+            historyTemplates: mostRecent.historyTemplates || '',
+            webTemplates: mostRecent.webTemplates || '',
+            zipArchive: mostRecent.zipArchive || ''
+        };
+    }
+
+    // Fallback to old single-target system
     try {
         const settings = JSON.parse(localStorage.getItem('publicationSettings') || '{}');
         return {
@@ -3912,6 +4304,10 @@ function buildPublishCommand(ig, jarPath, publishSettings) {
 function createPublishDialogHTML(ig, validation, settings) {
     const publicationSummary = createPublicationSummary(validation);
     const validationStatus = createValidationStatus(validation);
+    const targets = loadPublicationTargets();
+    const targetOptions = Object.keys(targets).map(name =>
+      `<option value="${name}">${name}</option>`
+    ).join('');
 
     return `
         <div class="dialog-overlay">
@@ -3921,6 +4317,31 @@ function createPublishDialogHTML(ig, validation, settings) {
                     
                     ${publicationSummary}
                     ${validationStatus}
+                    
+                    <div class="form-section">
+                        <h3>Publication Target</h3>
+                        
+                        <div class="form-group-inline">
+                            <label for="pub-target-select">Select Target:</label>
+                            <div class="input-with-button">
+                                <select id="pub-target-select">
+                                    <option value="">-- New Target --</option>
+                                    ${targetOptions}
+                                </select>
+                                <button type="button" id="save-target-btn">Save As...</button>
+                                <button type="button" id="delete-target-btn" disabled>Delete</button>
+                            </div>
+                        </div>
+                        
+                        <div class="form-group-inline">
+                            <label for="target-name">Target Name:</label>
+                            <input type="text" id="target-name" placeholder="Enter name to save this configuration">
+                        </div>
+                        
+                        <div class="helper-text">
+                            Select an existing target to load its settings, or create a new target configuration.
+                        </div>
+                    </div>
                     
                     <div class="form-section">
                         <h3>Publication Settings</h3>
@@ -4026,7 +4447,128 @@ function createValidationStatus(validation) {
 
 // 13. ADD function to setup dialog event listeners
 function setupPublishDialogListeners(dialog) {
-    // Browse buttons - ALL use 'select-folder' since that's what's available
+    // Target selection dropdown
+    const targetSelect = dialog.querySelector('#pub-target-select');
+    const targetNameInput = dialog.querySelector('#target-name');
+    const saveTargetBtn = dialog.querySelector('#save-target-btn');
+    const deleteTargetBtn = dialog.querySelector('#delete-target-btn');
+
+    // Input fields
+    const websiteFolder = dialog.querySelector('#pub-website-folder');
+    const registryFile = dialog.querySelector('#pub-registry-file');
+    const historyTemplates = dialog.querySelector('#pub-history-templates');
+    const webTemplates = dialog.querySelector('#pub-web-templates');
+    const zipArchive = dialog.querySelector('#pub-zip-archive');
+
+    // Load target configuration when selected
+    targetSelect.addEventListener('change', function() {
+        const selectedTarget = this.value;
+
+        if (selectedTarget) {
+            const targets = loadPublicationTargets();
+            const config = targets[selectedTarget];
+
+            if (config) {
+                websiteFolder.value = config.websiteFolder || '';
+                registryFile.value = config.registryFile || '';
+                historyTemplates.value = config.historyTemplates || '';
+                webTemplates.value = config.webTemplates || '';
+                zipArchive.value = config.zipArchive || '';
+                targetNameInput.value = selectedTarget;
+
+                deleteTargetBtn.disabled = false;
+            }
+        } else {
+            // Clear fields for new target
+            targetNameInput.value = '';
+            deleteTargetBtn.disabled = true;
+        }
+    });
+
+    // Save target configuration
+    saveTargetBtn.addEventListener('click', function() {
+        const name = targetNameInput.value.trim();
+
+        if (!name) {
+            alert('Please enter a name for this target configuration');
+            return;
+        }
+
+        const settings = {
+            websiteFolder: websiteFolder.value.trim(),
+            registryFile: registryFile.value.trim(),
+            historyTemplates: historyTemplates.value.trim(),
+            webTemplates: webTemplates.value.trim(),
+            zipArchive: zipArchive.value.trim()
+        };
+
+        if (!settings.websiteFolder || !settings.registryFile ||
+          !settings.historyTemplates || !settings.webTemplates ||
+          !settings.zipArchive) {
+            alert('Please fill in all fields before saving');
+            return;
+        }
+
+        savePublicationTarget(name, settings);
+
+        // Update the dropdown
+        if (!Array.from(targetSelect.options).some(opt => opt.value === name)) {
+            const option = document.createElement('option');
+            option.value = name;
+            option.textContent = name;
+            targetSelect.appendChild(option);
+        }
+
+        targetSelect.value = name;
+        deleteTargetBtn.disabled = false;
+
+        // Show success message
+        const originalText = saveTargetBtn.textContent;
+        saveTargetBtn.textContent = 'Saved!';
+        saveTargetBtn.style.backgroundColor = '#28a745';
+        setTimeout(() => {
+            saveTargetBtn.textContent = originalText;
+            saveTargetBtn.style.backgroundColor = '';
+        }, 1500);
+    });
+
+    // Delete target configuration
+    deleteTargetBtn.addEventListener('click', function() {
+        const selectedTarget = targetSelect.value;
+
+        if (!selectedTarget) return;
+
+        if (confirm(`Delete target configuration "${selectedTarget}"?`)) {
+            deletePublicationTarget(selectedTarget);
+
+            // Remove from dropdown
+            const optionToRemove = Array.from(targetSelect.options)
+              .find(opt => opt.value === selectedTarget);
+            if (optionToRemove) {
+                optionToRemove.remove();
+            }
+
+            // Reset form
+            targetSelect.value = '';
+            targetNameInput.value = '';
+            deleteTargetBtn.disabled = true;
+        }
+    });
+
+    // Auto-populate target name when typing
+    [websiteFolder, registryFile, historyTemplates, webTemplates, zipArchive].forEach(input => {
+        input.addEventListener('input', function() {
+            if (!targetNameInput.value && !targetSelect.value) {
+                // Auto-suggest a name based on website folder
+                if (input === websiteFolder && websiteFolder.value) {
+                    const folderName = path.basename(websiteFolder.value);
+                    targetNameInput.value = folderName;
+                }
+            }
+        });
+    });
+
+    // Browse buttons - same as before but triggers auto-naming
     const browseButtons = [
         { id: 'browse-website-folder', inputId: 'pub-website-folder' },
         { id: 'browse-registry-file', inputId: 'pub-registry-file' },
@@ -4042,7 +4584,6 @@ function setupPublishDialogListeners(dialog) {
         if (btn && input) {
             btn.addEventListener('click', async function() {
                 try {
-                    // Use select-folder for all selections
                     const result = await ipcRenderer.invoke('select-folder');
 
                     if (!result.canceled && result.filePaths.length > 0) {
@@ -4054,9 +4595,7 @@ function setupPublishDialogListeners(dialog) {
                             if (fs.existsSync(registryPath)) {
                                 input.value = registryPath;
                             } else {
-                                // Let user specify the full path manually
                                 input.value = selectedPath;
-                                // Show a helpful message
                                 setTimeout(() => {
                                     alert('fhir-ig-list.json not found in selected folder.\nPlease manually add the filename to the path.');
                                 }, 100);
@@ -4064,6 +4603,9 @@ function setupPublishDialogListeners(dialog) {
                         } else {
                             input.value = selectedPath;
                         }
+
+                        // Trigger auto-naming
+                        input.dispatchEvent(new Event('input'));
                     }
                 } catch (error) {
                     console.log('Error selecting folder:', error);
@@ -4073,7 +4615,7 @@ function setupPublishDialogListeners(dialog) {
         }
     });
 
-    // Documentation links
+    // Documentation links - same as before
     const docLinks = dialog.querySelectorAll('.doc-link');
     docLinks.forEach(link => {
         link.addEventListener('click', async function(e) {
@@ -4088,4 +4630,920 @@ function setupPublishDialogListeners(dialog) {
             }
         });
     });
+
+    // Load most recent target by default
+    const mostRecent = getMostRecentTarget();
+    if (mostRecent && targetSelect.querySelector(`option[value="${mostRecent.name}"]`)) {
+        targetSelect.value = mostRecent.name;
+        targetSelect.dispatchEvent(new Event('change'));
+    }
 }
+
+// Load publication targets from localStorage
+function loadPublicationTargets() {
+    try {
+        const saved = localStorage.getItem('publicationTargets');
+        return saved ? JSON.parse(saved) : {};
+    } catch (error) {
+        console.log('Could not load publication targets:', error);
+        return {};
+    }
+}
+
+// Save publication targets to localStorage
+function savePublicationTargets(targets) {
+    try {
+        localStorage.setItem('publicationTargets', JSON.stringify(targets));
+    } catch (error) {
+        console.log('Could not save publication targets:', error);
+    }
+}
+
+// Save a publication target configuration
+function savePublicationTarget(name, settings) {
+    const targets = loadPublicationTargets();
+    targets[name] = {
+        ...settings,
+        lastUsed: Date.now()
+    };
+    savePublicationTargets(targets);
+}
+
+// Delete a publication target
+function deletePublicationTarget(name) {
+    const targets = loadPublicationTargets();
+    delete targets[name];
+    savePublicationTargets(targets);
+}
+
+// Get the most recently used target
+function getMostRecentTarget() {
+    const targets = loadPublicationTargets();
+    let mostRecent = null;
+    let latestTime = 0;
+
+    for (const [name, config] of Object.entries(targets)) {
+        if (config.lastUsed && config.lastUsed > latestTime) {
+            latestTime = config.lastUsed;
+            mostRecent = { name, ...config };
+        }
+    }
+
+    return mostRecent;
+}
+
+function setupOtherGitDialogListeners(dialog) {
+    console.log('Setting up other listeners');
+
+    // Browse button
+    const browseBtn = dialog.querySelector('#browse-base-folder');
+    if (browseBtn) {
+        browseBtn.addEventListener('click', async function(e) {
+            e.preventDefault();
+            try {
+                const result = await ipcRenderer.invoke('select-folder');
+                if (!result.canceled && result.filePaths.length > 0) {
+                    dialog.querySelector('#base-folder').value = result.filePaths[0];
+                }
+            } catch (error) {
+                alert('Error selecting folder: ' + error.message);
+            }
+        });
+    }
+
+    // Paste button with fixed default branch detection
+    const pasteBtn = dialog.querySelector('#paste-btn');
+    if (pasteBtn) {
+        pasteBtn.addEventListener('click', async function(e) {
+            e.preventDefault();
+            try {
+                const clipboardText = await navigator.clipboard.readText();
+                const parsed = parseGitUrl(clipboardText, true);
+
+                if (parsed) {
+                    dialog.querySelector('#git-org').value = parsed.org;
+                    dialog.querySelector('#git-repo').value = parsed.repo;
+                    dialog.querySelector('#git-branch').value = parsed.branch;
+                    dialog.querySelector('#git-server').value = parsed.baseUrl || '';
+
+                    // Try to get the actual default branch
+                    if (parsed.branch === 'main' || parsed.branch === 'master') {
+                        const defaultBranch = await getDefaultBranch(
+                          parsed.org,
+                          parsed.repo,
+                          parsed.serverType === 'build.fhir.org' ? 'github' : parsed.serverType,
+                          parsed.serverType === 'build.fhir.org' ? 'https://github.com' : parsed.baseUrl
+                        );
+
+                        if (defaultBranch && defaultBranch !== parsed.branch) {
+                            dialog.querySelector('#git-branch').value = defaultBranch;
+                            console.log(`Updated branch from ${parsed.branch} to ${defaultBranch}`);
+                        }
+                    }
+
+                    // Visual feedback
+                    pasteBtn.style.backgroundColor = '#28a745';
+                    pasteBtn.textContent = 'Pasted!';
+                    setTimeout(() => {
+                        pasteBtn.style.backgroundColor = '';
+                        pasteBtn.textContent = 'Paste from Clipboard';
+                    }, 1500);
+                }
+            } catch (error) {
+                alert('Paste error: ' + error.message);
+            }
+        });
+    }
+}
+
+function initializeSearch() {
+    igSearch = new IGSearch();
+    searchPanel = document.getElementById('search-panel');
+    setupSearchEventHandlers();
+    setupSearchContextMenu();
+    setupSearchResizer();
+    setupSearchKeyboardShortcuts();
+}
+
+function setupSearchResizer() {
+    if (!searchPanel) return;
+
+    // Add resizer element
+    const resizer = document.createElement('div');
+    resizer.className = 'search-panel-resizer';
+    searchPanel.appendChild(resizer);
+
+    resizer.addEventListener('mousedown', function(e) {
+        isResizingSearchPanel = true;
+        resizer.classList.add('resizing');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+    });
+
+    // Update the existing mousemove handler to properly handle positioning
+    document.addEventListener('mousemove', function(e) {
+        if (!isResizingSearchPanel) return;
+
+        const newWidth = window.innerWidth - e.clientX;
+        const minWidth = 300;
+        const maxWidth = 800;
+
+        searchPanelWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
+
+        searchPanel.style.width = searchPanelWidth + 'px';
+
+        if (document.body.classList.contains('search-panel-open')) {
+            // Update main content margin when panel is visible
+            document.querySelector('.main-content').style.marginRight = searchPanelWidth + 'px';
+            // Ensure panel stays at right: 0 when visible
+            searchPanel.style.right = '0px';
+        } else {
+            // Update hidden position when panel is not visible
+            searchPanel.style.right = `-${searchPanelWidth}px`;
+        }
+    });
+
+    document.addEventListener('mouseup', function() {
+        if (isResizingSearchPanel) {
+            isResizingSearchPanel = false;
+            document.querySelector('.search-panel-resizer').classList.remove('resizing');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+
+            // Save the width preference
+            localStorage.setItem('searchPanelWidth', searchPanelWidth);
+        }
+    });
+
+    // Load saved width and set initial hidden position
+    const savedWidth = localStorage.getItem('searchPanelWidth');
+    if (savedWidth) {
+        searchPanelWidth = parseInt(savedWidth);
+        searchPanel.style.width = searchPanelWidth + 'px';
+    }
+
+    // Set initial hidden position based on current width
+    if (!searchPanelVisible) {
+        searchPanel.style.right = `-${searchPanelWidth}px`;
+    }
+}
+
+// Setup keyboard shortcuts for search
+function setupSearchKeyboardShortcuts() {
+    document.addEventListener('keydown', function(e) {
+        // Ctrl+C in search results
+        if ((e.ctrlKey || e.metaKey) && e.key === 'c' && searchPanelVisible) {
+            const selection = window.getSelection();
+            if (selection.toString()) {
+                // Let the browser handle the copy
+                return;
+            }
+        }
+
+        // Escape to close search panel
+        if (e.key === 'Escape' && searchPanelVisible) {
+            hideSearchPanel();
+        }
+    });
+}
+
+function setupSearchEventHandlers() {
+    // Search button in toolbar
+    const searchBtn = document.getElementById('btn-search');
+    if (searchBtn) {
+        searchBtn.addEventListener('click', toggleSearchPanel);
+    }
+
+    // Search input and execute button
+    const searchInput = document.getElementById('search-input');
+    const executeBtn = document.getElementById('search-execute-btn');
+
+    if (searchInput && executeBtn) {
+        // Make sure search input is properly interactive
+        searchInput.addEventListener('focus', function() {
+            console.log('Search input focused');
+        });
+
+        searchInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                executeSearch();
+            }
+        });
+
+        // Handle paste events
+        searchInput.addEventListener('paste', function(e) {
+            console.log('Paste event in search input');
+            setTimeout(() => {
+                console.log('Search input value after paste:', this.value);
+            }, 10);
+        });
+
+        executeBtn.addEventListener('click', executeSearch);
+
+        // Auto-save search state when input changes
+        searchInput.addEventListener('input', saveCurrentSearchState);
+    }
+
+    // Search options checkboxes
+    const optionCheckboxes = [
+        'search-case-sensitive',
+        'search-whole-words'
+    ];
+
+    optionCheckboxes.forEach(id => {
+        const checkbox = document.getElementById(id);
+        if (checkbox) {
+            checkbox.addEventListener('change', saveCurrentSearchState);
+        }
+    });
+
+    // Category checkboxes
+    const categoryCheckboxes = [
+        'search-fsh',
+        'search-input-resources',
+        'search-input-pages',
+        'search-translations',
+        'search-output-resources',
+        'search-output-html'
+    ];
+
+    categoryCheckboxes.forEach(id => {
+        const checkbox = document.getElementById(id);
+        if (checkbox) {
+            checkbox.addEventListener('change', saveCurrentSearchState);
+        }
+    });
+}
+
+
+// Toggle search panel visibility
+function toggleSearchPanel() {
+    if (searchPanelVisible) {
+        hideSearchPanel();
+    } else {
+        showSearchPanel();
+    }
+}
+
+// Show search panel
+function showSearchPanel() {
+    if (!searchPanel || !igSearch) return;
+
+    const ig = getSelectedIg();
+    if (!ig) {
+        appendToBuildOutput('Please select an IG to search');
+        return;
+    }
+
+    searchPanelVisible = true;
+    searchPanel.classList.add('visible');
+    searchPanel.style.width = searchPanelWidth + 'px';
+    searchPanel.style.right = '0px'; // Explicitly set to 0 when visible
+
+    document.body.classList.add('search-panel-open');
+    document.querySelector('.main-content').style.marginRight = searchPanelWidth + 'px';
+    document.getElementById('btn-search').classList.add('active');
+
+    // Load search state for current IG
+    loadSearchStateForIg(ig.folder);
+
+    // Update category availability
+    updateCategoryAvailability(ig.folder);
+
+    // Focus search input
+    setTimeout(() => {
+        const searchInput = document.getElementById('search-input');
+        if (searchInput) {
+            searchInput.focus();
+        }
+    }, 100);
+}
+
+// Hide search panel
+function hideSearchPanel() {
+    if (!searchPanel) return;
+
+    if (searchPanelVisible) {
+        saveCurrentSearchState();
+    }
+    searchPanelVisible = false;
+    searchPanel.classList.remove('visible');
+
+    // Dynamically set the hidden position based on current width
+    searchPanel.style.right = `-${searchPanelWidth}px`;
+
+    document.body.classList.remove('search-panel-open');
+    document.querySelector('.main-content').style.marginRight = '0';
+    document.getElementById('btn-search').classList.remove('active');
+}
+
+// Load search state for current IG
+function loadSearchStateForIg(igFolder) {
+    if (!igSearch) return;
+
+    const state = igSearch.getSearchState(igFolder);
+    currentSearchState = state;
+
+    // Update UI with saved state
+    document.getElementById('search-input').value = state.searchTerm;
+    document.getElementById('search-case-sensitive').checked = state.caseSensitive;
+    document.getElementById('search-whole-words').checked = state.wholeWords;
+
+    // Update category checkboxes
+    document.getElementById('search-fsh').checked = state.categories.fsh;
+    document.getElementById('search-input-resources').checked = state.categories.inputResources;
+    document.getElementById('search-input-pages').checked = state.categories.inputPages;
+    document.getElementById('search-translations').checked = state.categories.translations;
+    document.getElementById('search-output-resources').checked = state.categories.outputResources;
+    document.getElementById('search-output-html').checked = state.categories.outputHtml;
+
+    // Display previous results if any
+    displaySearchResults(state.results);
+}
+
+// Update category availability based on IG state
+function updateCategoryAvailability(igFolder) {
+    if (!igSearch) return;
+
+    const availability = igSearch.getCategoryAvailability(igFolder);
+
+    // Update FSH category
+    const fshCategory = document.querySelector('label[for="search-fsh"]');
+    const fshCheckbox = document.getElementById('search-fsh');
+    if (fshCategory && fshCheckbox) {
+        if (availability.fsh) {
+            fshCategory.classList.remove('disabled');
+            fshCheckbox.disabled = false;
+        } else {
+            fshCategory.classList.add('disabled');
+            fshCheckbox.disabled = true;
+            fshCheckbox.checked = false;
+        }
+    }
+
+    // Update output categories
+    const outputCategories = [
+        { id: 'search-output-resources', available: availability.outputResources },
+        { id: 'search-output-html', available: availability.outputHtml }
+    ];
+
+    outputCategories.forEach(({ id, available }) => {
+        const category = document.querySelector(`label[for="${id}"]`);
+        const checkbox = document.getElementById(id);
+        if (category && checkbox) {
+            if (available) {
+                category.classList.remove('disabled');
+                checkbox.disabled = false;
+            } else {
+                category.classList.add('disabled');
+                checkbox.disabled = true;
+                checkbox.checked = false;
+            }
+        }
+    });
+}
+
+// Save current search state
+function saveCurrentSearchState() {
+    const ig = getSelectedIg();
+    if (!ig || !igSearch || !currentSearchState) return;
+
+    // Update state object with current UI values
+    const searchInput = document.getElementById('search-input');
+    const caseSensitiveInput = document.getElementById('search-case-sensitive');
+    const wholeWordsInput = document.getElementById('search-whole-words');
+
+    if (searchInput) currentSearchState.searchTerm = searchInput.value;
+    if (caseSensitiveInput) currentSearchState.caseSensitive = caseSensitiveInput.checked;
+    if (wholeWordsInput) currentSearchState.wholeWords = wholeWordsInput.checked;
+
+    const fshInput = document.getElementById('search-fsh');
+    const inputResourcesInput = document.getElementById('search-input-resources');
+    const inputPagesInput = document.getElementById('search-input-pages');
+    const translationsInput = document.getElementById('search-translations');
+    const outputResourcesInput = document.getElementById('search-output-resources');
+    const outputHtmlInput = document.getElementById('search-output-html');
+
+    if (fshInput) currentSearchState.categories.fsh = fshInput.checked;
+    if (inputResourcesInput) currentSearchState.categories.inputResources = inputResourcesInput.checked;
+    if (inputPagesInput) currentSearchState.categories.inputPages = inputPagesInput.checked;
+    if (translationsInput) currentSearchState.categories.translations = translationsInput.checked;
+    if (outputResourcesInput) currentSearchState.categories.outputResources = outputResourcesInput.checked;
+    if (outputHtmlInput) currentSearchState.categories.outputHtml = outputHtmlInput.checked;
+
+    // Save to search module
+    igSearch.saveSearchState(ig.folder, currentSearchState);
+
+    console.log('Saved search state for IG:', ig.name, currentSearchState);
+}
+
+// Execute search
+async function executeSearch() {
+    const ig = getSelectedIg();
+    if (!ig || !igSearch) return;
+
+    const searchTerm = document.getElementById('search-input').value.trim();
+    if (!searchTerm) {
+        displaySearchResults([]);
+        return;
+    }
+
+    // Save current state first
+    saveCurrentSearchState();
+
+    // Show loading state
+    showSearchLoading();
+
+    try {
+        // Set current IG folder for relative paths
+        igSearch.setCurrentIgFolder(ig.folder);
+
+        // Perform search
+        const result = await igSearch.performSearch(ig.folder, searchTerm, {
+            caseSensitive: currentSearchState.caseSensitive,
+            wholeWords: currentSearchState.wholeWords,
+            categories: currentSearchState.categories
+        });
+
+        if (result.error) {
+            showSearchError(result.error);
+        } else {
+            // Update state with results
+            currentSearchState.results = result.results;
+            currentSearchState.lastSearchTime = Date.now();
+            igSearch.saveSearchState(ig.folder, currentSearchState);
+
+            // Display results
+            displaySearchResults(result.results, result.totalMatches, result.truncated);
+        }
+
+    } catch (error) {
+        console.error('Search error:', error);
+        showSearchError(error.message);
+    }
+}
+
+// Show search loading state
+function showSearchLoading() {
+    const resultsList = document.getElementById('search-results-list');
+    const resultsCount = document.getElementById('search-results-count');
+
+    if (resultsList && resultsCount) {
+        resultsList.innerHTML = '<div class="search-results-loading">Searching...</div>';
+        resultsCount.textContent = 'Searching...';
+    }
+}
+
+// Show search error
+function showSearchError(errorMessage) {
+    const resultsList = document.getElementById('search-results-list');
+    const resultsCount = document.getElementById('search-results-count');
+
+    if (resultsList && resultsCount) {
+        resultsList.innerHTML = `<div class="search-results-error">Search failed: ${errorMessage}</div>`;
+        resultsCount.textContent = 'Search failed';
+    }
+}
+
+// Display search results
+function displaySearchResults(results, totalMatches = null, truncated = false) {
+    const resultsList = document.getElementById('search-results-list');
+    const resultsCount = document.getElementById('search-results-count');
+
+    if (!resultsList || !resultsCount) return;
+
+    if (!results || results.length === 0) {
+        resultsList.innerHTML = '<div class="search-results-empty">No matches found</div>';
+        resultsCount.textContent = 'No results';
+        return;
+    }
+
+    // Update results count
+    const fileCount = results.length;
+    const matchCount = totalMatches || results.reduce((sum, result) => sum + result.totalMatches, 0);
+    let countText = `${fileCount} file${fileCount !== 1 ? 's' : ''}, ${matchCount} match${matchCount !== 1 ? 'es' : ''}`;
+    if (truncated) {
+        countText += ' (truncated)';
+    }
+    resultsCount.textContent = countText;
+
+    // Build results HTML
+    const resultsHTML = results.map(result => createSearchResultHTML(result)).join('');
+    resultsList.innerHTML = resultsHTML;
+
+    // Set up result event handlers
+    setupSearchResultHandlers();
+}
+
+// Create HTML for a single search result
+function createSearchResultHTML(result) {
+    const categoryClass = result.category.replace(/([A-Z])/g, '-$1').toLowerCase();
+    const categoryDisplay = result.category.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+
+    const matchesHTML = result.matches.map(match => {
+        const highlightedLine = highlightSearchMatches(match.line, currentSearchState.searchTerm, currentSearchState.caseSensitive, currentSearchState.wholeWords);
+        return `
+            <div class="search-result-match" data-file-path="${result.filePath}" data-line-number="${match.lineNumber}">
+                <span class="search-result-line-number">${match.lineNumber}:</span>
+                <span class="search-result-line-content">${highlightedLine}</span>
+                <button class="search-result-open-btn" onclick="openFileInDefaultApp('${result.filePath}', ${match.lineNumber}); event.stopPropagation();" title="Open file at line ${match.lineNumber}">Open</button>
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <div class="search-result-file" data-file-path="${result.filePath}">
+            <div class="search-result-file-header">
+                <div class="search-result-file-info">
+                    <span class="search-result-filename" title="${result.filePath}">${result.fileName}</span>
+                    <span class="search-result-category ${categoryClass}">${categoryDisplay}</span>
+                </div>
+                <span class="search-result-match-count">${result.matches.length} match${result.matches.length !== 1 ? 'es' : ''}</span>
+            </div>
+            <div class="search-result-matches">
+                ${matchesHTML}
+            </div>
+        </div>
+    `;
+}
+
+// Highlight search matches in text
+function highlightSearchMatches(text, searchTerm, caseSensitive, wholeWords) {
+    if (!searchTerm) return escapeHtml(text);
+
+    try {
+        let escapedTerm = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (wholeWords) {
+            escapedTerm = `\\b${escapedTerm}\\b`;
+        }
+        const flags = caseSensitive ? 'gi' : 'gi';
+        const pattern = new RegExp(`(${escapedTerm})`, flags);
+
+        return escapeHtml(text).replace(pattern, '<span class="search-highlight">$1</span>');
+    } catch (error) {
+        return escapeHtml(text);
+    }
+}
+
+// Escape HTML characters
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Set up event handlers for search results
+function setupSearchResultHandlers() {
+    // File header click to expand/collapse
+    document.querySelectorAll('.search-result-file-header').forEach(header => {
+        header.addEventListener('click', function(e) {
+            // Always toggle - header doesn't support text selection
+            const fileElement = this.parentElement;
+            fileElement.classList.toggle('expanded');
+        });
+    });
+
+    // Match interaction handlers
+    document.querySelectorAll('.search-result-match').forEach(match => {
+        // Track if user is selecting text
+        let isSelecting = false;
+        let selectionStart = null;
+
+        match.addEventListener('mousedown', function(e) {
+            selectionStart = { x: e.clientX, y: e.clientY };
+            isSelecting = false;
+        });
+
+        match.addEventListener('mousemove', function(e) {
+            if (selectionStart) {
+                const distance = Math.sqrt(
+                  Math.pow(e.clientX - selectionStart.x, 2) +
+                  Math.pow(e.clientY - selectionStart.y, 2)
+                );
+                if (distance > 3) { // Threshold for selection vs click
+                    isSelecting = true;
+                    this.classList.add('selecting');
+                }
+            }
+        });
+
+        match.addEventListener('mouseup', function(e) {
+            selectionStart = null;
+            setTimeout(() => {
+                this.classList.remove('selecting');
+            }, 100);
+        });
+
+        // Click to open file (only if not selecting)
+        match.addEventListener('click', function(e) {
+            if (!isSelecting && !window.getSelection().toString()) {
+                const filePath = this.dataset.filePath;
+                const lineNumber = this.dataset.lineNumber;
+                openFileInDefaultApp(filePath, lineNumber);
+            }
+            isSelecting = false;
+        });
+
+        // Right-click for context menu
+        match.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            showSearchContextMenu(e, this.dataset.filePath, this.dataset.lineNumber);
+        });
+    });
+}
+
+// Set up search context menu
+function setupSearchContextMenu() {
+    const menu = document.getElementById('search-context-menu');
+    if (!menu) return;
+
+    const menuItems = menu.querySelectorAll('.context-menu-item');
+    menuItems.forEach(item => {
+        item.addEventListener('click', function() {
+            const action = this.dataset.action;
+            const filePath = menu.dataset.filePath;
+            const lineNumber = menu.dataset.lineNumber;
+
+            switch (action) {
+                case 'open-default':
+                    openFileInDefaultApp(filePath, lineNumber);
+                    break;
+                case 'open-folder':
+                    openFileInFolder(filePath);
+                    break;
+                case 'copy-line':
+                    copyMatchLine(menu.dataset.matchElement);
+                    break;
+                case 'copy-path':
+                    copyToClipboard(filePath);
+                    break;
+            }
+
+            closeContextMenus();
+        });
+    });
+}
+
+function copyMatchLine(matchElement) {
+    if (!matchElement) return;
+
+    const selection = window.getSelection();
+    const selectedText = selection.toString();
+
+    if (selectedText) {
+        // Copy selected text
+        copyToClipboard(selectedText);
+        appendToBuildOutput('Copied selected text to clipboard');
+    } else {
+        // Copy entire line
+        const lineContent = matchElement.querySelector('.search-result-line-content');
+        if (lineContent) {
+            const text = lineContent.textContent;
+            copyToClipboard(text);
+            appendToBuildOutput('Copied line to clipboard');
+        }
+    }
+}
+
+// Copy text to clipboard
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+        console.log('Text copied to clipboard');
+    }).catch(err => {
+        console.error('Failed to copy text: ', err);
+    });
+}
+
+// Show search context menu
+function showSearchContextMenu(event, filePath, lineNumber) {
+    const menu = document.getElementById('search-context-menu');
+    if (!menu) return;
+
+    menu.dataset.filePath = filePath;
+    menu.dataset.lineNumber = lineNumber;
+    menu.dataset.matchElement = event.target.closest('.search-result-match');
+
+    // Update menu items based on selection
+    const hasSelection = window.getSelection().toString().length > 0;
+    const copyLineItem = menu.querySelector('[data-action="copy-line"]');
+    if (copyLineItem) {
+        copyLineItem.textContent = hasSelection ? '📋 Copy Selected Text' : '📋 Copy Line';
+    }
+
+    menu.style.display = 'block';
+    menu.style.left = event.pageX + 'px';
+    menu.style.top = event.pageY + 'px';
+
+    // Adjust position if menu would go off screen
+    const rect = menu.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    if (rect.right > viewportWidth) {
+        menu.style.left = (viewportWidth - rect.width - 5) + 'px';
+    }
+
+    if (rect.bottom > viewportHeight) {
+        menu.style.top = (viewportHeight - rect.height - 5) + 'px';
+    }
+
+    event.stopPropagation();
+}
+
+// Open file in default application
+async function openFileInDefaultApp(filePath, lineNumber) {
+    try {
+        const editorCommand = await getTextEditorCommand();
+
+        if (editorCommand) {
+            // Use custom editor command from settings
+            const command = editorCommand
+              .replace('${file}', `"${filePath}"`)
+              .replace('${line}', lineNumber);
+
+            const { spawn } = require('child_process');
+            const os = require('os');
+            const platform = os.platform();
+
+            if (platform === 'win32') {
+                spawn('cmd', ['/c', command], { detached: true, stdio: 'ignore' });
+            } else {
+                spawn('sh', ['-c', command], { detached: true, stdio: 'ignore' });
+            }
+
+            appendToBuildOutput(`Opened ${path.basename(filePath)} at line ${lineNumber} with custom editor`);
+            return;
+        }
+
+        // Try common editors
+        const success = await tryCommonEditors(filePath, lineNumber);
+        if (success) {
+            return;
+        }
+
+        // Fallback to default application without line number
+        const fileUrl = 'file://' + filePath.replace(/\\/g, '/');
+        await ipcRenderer.invoke('open-external', fileUrl);
+        appendToBuildOutput(`Opened ${path.basename(filePath)} in default application (line ${lineNumber})`);
+
+    } catch (error) {
+        appendToBuildOutput(`Failed to open file: ${error.message}`);
+    }
+}
+
+// Get text editor command from fhir-settings.json
+async function getTextEditorCommand() {
+    try {
+        const settingsPath = await ipcRenderer.invoke('get-fhir-settings-path');
+
+        if (!fs.existsSync(settingsPath)) {
+            return null;
+        }
+
+        const settingsContent = fs.readFileSync(settingsPath, 'utf8');
+        const settings = JSON.parse(settingsContent);
+
+        // Look for textEditorCommand in the settings
+        if (settings.textEditorCommand) {
+            let s = settings.textEditorCommand;
+            return s;
+        }
+
+        return null;
+    } catch (error) {
+        console.log('Error reading text editor settings:', error);
+        return null;
+    }
+}
+
+async function tryCommonEditors(filePath, lineNumber) {
+    const { spawn } = require('child_process');
+    const os = require('os');
+    const platform = os.platform();
+
+    const editors = [];
+
+    if (platform === 'darwin') {
+        // macOS
+        editors.push(
+          () => spawn('open', ['-a', 'Visual Studio Code', '--args', '-g', `${filePath}:${lineNumber}`], { detached: true, stdio: 'ignore' }),
+          () => spawn('open', ['-a', 'Sublime Text', `${filePath}:${lineNumber}`], { detached: true, stdio: 'ignore' }),
+          () => spawn('open', ['-a', 'TextMate', '-l', lineNumber, filePath], { detached: true, stdio: 'ignore' })
+        );
+    } else if (platform === 'win32') {
+        // Windows
+        editors.push(
+          () => spawn('code', ['-g', `${filePath}:${lineNumber}`], { detached: true, stdio: 'ignore' }),
+          () => spawn('subl', [`${filePath}:${lineNumber}`], { detached: true, stdio: 'ignore' }),
+          () => spawn('notepad++', ['-n' + lineNumber, filePath], { detached: true, stdio: 'ignore' })
+        );
+    } else {
+        // Linux
+        editors.push(
+          () => spawn('code', ['-g', `${filePath}:${lineNumber}`], { detached: true, stdio: 'ignore' }),
+          () => spawn('subl', [`${filePath}:${lineNumber}`], { detached: true, stdio: 'ignore' }),
+          () => spawn('gedit', [`+${lineNumber}`, filePath], { detached: true, stdio: 'ignore' })
+        );
+    }
+
+    for (const editorFunc of editors) {
+        try {
+            editorFunc();
+            appendToBuildOutput(`Opened ${path.basename(filePath)} at line ${lineNumber}`);
+            return true;
+        } catch (error) {
+            // Try next editor
+            continue;
+        }
+    }
+
+    return false;
+}
+
+// Open file in folder
+async function openFileInFolder(filePath) {
+    try {
+        await ipcRenderer.invoke('show-item-in-folder', filePath);
+        appendToBuildOutput(`Opened folder for: ${path.basename(filePath)}`);
+    } catch (error) {
+        appendToBuildOutput(`Failed to open folder: ${error.message}`);
+    }
+}
+
+// Update search when IG selection changes
+function updateSearchForSelectedIg() {
+    if (searchPanelVisible) {
+        const ig = getSelectedIg();
+        if (ig) {
+            loadSearchStateForIg(ig.folder);
+            updateCategoryAvailability(ig.folder);
+        } else {
+            hideSearchPanel();
+        }
+    }
+}
+
+// Clear output search results when build starts
+function clearSearchOutputResults() {
+    const ig = getSelectedIg();
+    if (ig && igSearch) {
+        igSearch.clearOutputResults(ig.folder);
+
+        // If search panel is visible and showing results, refresh them
+        if (searchPanelVisible && currentSearchState && currentSearchState.results.length > 0) {
+            const hasOutputResults = currentSearchState.results.some(result =>
+              result.category.startsWith('output')
+            );
+
+            if (hasOutputResults) {
+                const filteredResults = currentSearchState.results.filter(result =>
+                  !result.category.startsWith('output')
+                );
+                displaySearchResults(filteredResults);
+            }
+        }
+    }
+}
+
+ipcRenderer.on('menu-search', showSearchPanel);

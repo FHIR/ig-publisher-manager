@@ -5,6 +5,15 @@ All notable changes to IG Publisher Manager will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.8.0] - 2025-22-08
+### Added
+- Search by IG
+
+### Changed
+- Extended Git functionality to support other servers
+- Added support for multiple targets for publishing IGs
+- Highlight new IGs to make them easier to find
+
 ## [v0.7.0] - 2025-08-08
 ### Changed
 - Fixed icons in clipboard menu
