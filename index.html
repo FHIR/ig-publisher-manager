@@ -365,6 +365,9 @@
             font-weight: 600;
             font-size: 13px;
             color: #666;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
 
         .ig-list {
@@ -1342,7 +1345,89 @@
         .search-panel-resizer.resizing {
             background: #007acc;
         }
+        .ig-list-container.drag-over {
+            border: 2px dashed #007acc;
+            background-color: #f0f8ff;
+        }
 
+        .drop-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 122, 204, 0.1);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: #007acc;
+        }
+        .ig-list-header {
+            background: #f8f9fa;
+            border-bottom: 1px solid #ddd;
+            padding: 8px 12px;
+            font-weight: 600;
+            font-size: 13px;
+            color: #666;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .ig-filter-container {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        #ig-filter {
+            padding: 4px 8px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            font-size: 12px;
+            width: 150px;
+            background: white;
+        }
+
+        #ig-filter:focus {
+            outline: 2px solid #007acc;
+            outline-offset: -2px;
+            border-color: #007acc;
+        }
+
+        #clear-filter {
+            background: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            width: 20px;
+            height: 20px;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+        }
+
+        #clear-filter:hover {
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        .ig-list tr.missing-folder {
+            background-color: #fff2f2 !important;
+            color: #721c24;
+        }
+
+        .ig-list tr.missing-folder:hover {
+            background-color: #f8d7da !important;
+        }
+
+        .status-missing {
+            background: #f8d7da;
+            color: #721c24;
+        }
     </style>
 </head>
 <body>
@@ -1552,8 +1637,13 @@
     <div class="main-content">
         <!-- IG List -->
         <div class="ig-list-container">
-            <div class="ig-list-header">Implementation Guides</div>
-
+            <div class="ig-list-header">
+                <span>Implementation Guides</span>
+                <div class="ig-filter-container">
+                    <input type="text" id="ig-filter" placeholder="Filter IGs..." />
+                    <button type="button" id="clear-filter" title="Clear filter">×</button>
+                </div>
+            </div>
             <div class="ig-list">
                 <table>
                     <thead>

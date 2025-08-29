@@ -16,6 +16,8 @@ let currentSearchState = null;
 let searchPanelWidth = 400; // Default width
 let isResizingSearchPanel = false;
 let previousSelectedIgIndex = -1;
+let igFilterText = '';
+let filteredIgList = [];
 
 // Sort state
 let sortState = {
@@ -464,6 +466,7 @@ document.addEventListener('DOMContentLoaded', function() {
     setupContextMenus();
     setupResizer();
     setupBuildOutput();
+    setupDragAndDrop();
 
     // Initialize search functionality
     initializeSearch();
@@ -644,6 +647,51 @@ function setupEventListeners() {
     document.getElementById('btn-documentation').addEventListener('click', showDocumentationMenu);
 
     setupColumnHeaderListeners();
+    setupDragAndDrop();
+    setupFilterHandlers();
+}
+
+function setupDragAndDrop() {
+    const igListContainer = document.querySelector('.ig-list-container');
+
+    igListContainer.addEventListener('dragover', handleDragOver);
+    igListContainer.addEventListener('dragleave', handleDragLeave);
+    igListContainer.addEventListener('drop', handleDrop);
+}
+
+function handleDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    this.classList.add('drag-over');
+}
+
+function handleDragLeave(e) {
+    this.classList.remove('drag-over');
+}
+
+async function handleDrop(e) {
+    e.preventDefault();
+    this.classList.remove('drag-over');
+
+    const files = Array.from(e.dataTransfer.files);
+
+    for (const file of files) {
+        if (file.type === '') { // Likely a folder?
+            await processDroppedFolder(file.path);
+        }
+    }
+}
+
+async function processDroppedFolder(folderPath) {
+    const igIniPath = path.join(folderPath, 'ig.ini');
+
+    if (fs.existsSync(igIniPath)) {
+        appendToBuildOutput(`Adding IG from dropped folder: ${folderPath}`);
+        await addIgFromFolder(folderPath);
+    } else {
+        appendToBuildOutput(`Dropped folder doesn't appear to be an IG (no ig.ini found): ${folderPath}`);
+        appendToBuildOutput('To be recognized as an IG, the folder must contain an ig.ini file');
+    }
 }
 
 // Settings management
@@ -740,22 +788,36 @@ async function getJarPath(version) {
 
 function updateIgList() {
     if (!igListBody) return;
-    sortIgList();
+    updateFilteredIgList();
+    sortFilteredIgList();
 
     igListBody.innerHTML = '';
 
-    for (let i = 0; i < igList.length; i++) {
-        const ig = igList[i];
+    for (let i = 0; i < filteredIgList.length; i++) {
+        const ig = filteredIgList[i];
+        const originalIndex = igList.indexOf(ig);
+
+        const folderExists = checkFolderExists(ig.folder);
+        if (!folderExists && ig.buildStatus !== 'Folder Missing') {
+            ig.buildStatus = 'Folder Missing';
+            // Save the updated status
+            setTimeout(() => saveIgList(), 100);
+        }
+
         const row = document.createElement('tr');
-        if (i === selectedIgIndex) {
+        if (originalIndex === selectedIgIndex) {
             row.classList.add('selected');
         }
+        if (!folderExists) {
+            row.classList.add('missing-folder');
+        }
+
         // Check if IG was added in the last 30 minutes
         if (ig.addedTimestamp && isNewlyAdded(ig.addedTimestamp)) {
             row.classList.add('newly-added');
         }
 
-        const index = i; // Capture for closure
+        const index = originalIndex; // Capture for closure
         row.addEventListener('click', function() {
             // Save current search state before switching
             if (searchPanelVisible && previousSelectedIgIndex !== -1 && previousSelectedIgIndex !== index) {
@@ -839,6 +901,18 @@ function updateIgList() {
     }
 }
 
+function sortFilteredIgList() {
+    if (!sortState.column) return;
+
+    const dataColumn = sortState.columnMap[sortState.column];
+    if (!dataColumn) return;
+
+    filteredIgList.sort((a, b) => {
+        const comparison = compareValues(a, b, dataColumn);
+        return sortState.direction === 'asc' ? comparison : -comparison;
+    });
+}
+
 function isNewlyAdded(addedTimestamp) {
     if (!addedTimestamp) return false;
     const thirtyMinutesInMs = 30 * 60 * 1000; // 30 minutes in milliseconds
@@ -851,9 +925,18 @@ function getStatusClass(status) {
         'Error': 'status-error',
         'Building': 'status-building',
         'Publishing': 'status-publishing',
-        'Not Built': 'status-none'
+        'Not Built': 'status-none',
+        'Folder Missing': 'status-missing'
     };
     return statusMap[status] || 'status-none';
+}
+
+function checkFolderExists(folderPath) {
+    try {
+        return fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory();
+    } catch (error) {
+        return false;
+    }
 }
 
 // Button state management
@@ -862,19 +945,20 @@ function updateButtonStates() {
     const hasSelection = ig !== null;
     const isBuilding = hasSelection && buildProcesses.has(selectedIgIndex);
     const isGitRepo = hasSelection && checkIfGitRepo(ig ? ig.folder : null);
+    const folderExists = hasSelection && checkFolderExists(ig ? ig.folder : null);
 
-    const canPublishToWebsite = hasSelection &&
+    const canPublishToWebsite = hasSelection && folderExists &&
       checkFileExists(ig ? ig.folder : null, 'output/qa.json') &&
       checkFileExists(ig ? ig.folder : null, 'publication-request.json');
 
     setButtonState('btn-delete', hasSelection);
-    setButtonState('btn-build', hasSelection && !isBuilding);
+    setButtonState('btn-build', hasSelection && !isBuilding && folderExists);
     setButtonState('btn-stop', hasSelection && isBuilding);
-    setButtonState('btn-open-ig', hasSelection && checkFileExists(ig ? ig.folder : null, 'output/index.html'));
-    setButtonState('btn-open-qa', hasSelection && checkFileExists(ig ? ig.folder : null, 'output/qa.html'));
+    setButtonState('btn-open-ig', hasSelection && folderExists && checkFileExists(ig ? ig.folder : null, 'output/index.html'));
+    setButtonState('btn-open-qa', hasSelection && folderExists && checkFileExists(ig ? ig.folder : null, 'output/qa.html'));
     setButtonState('btn-copy', hasSelection);
-    setButtonState('btn-update', hasSelection && isGitRepo);
-    setButtonState('btn-tools', hasSelection);
+    setButtonState('btn-update', hasSelection && isGitRepo && folderExists);
+    setButtonState('btn-tools', hasSelection && folderExists);
 }
 
 function setButtonState(buttonId, enabled) {
@@ -3730,9 +3814,11 @@ function compareBuildStatus(a, b) {
     const statusOrder = {
         'success': 1,
         'building': 2,
-        'error': 3,
-        'stopped': 4,
-        'not built': 5
+        'publishing': 3,
+        'error': 4,
+        'stopped': 5,
+        'folder missing': 6,
+        'not built': 7
     };
 
     const aOrder = statusOrder[a.toLowerCase()] || 999;
@@ -5543,6 +5629,64 @@ function clearSearchOutputResults() {
                 displaySearchResults(filteredResults);
             }
         }
+    }
+}
+
+function setupFilterHandlers() {
+    const filterInput = document.getElementById('ig-filter');
+    const clearButton = document.getElementById('clear-filter');
+
+    if (filterInput) {
+        filterInput.addEventListener('input', handleFilterChange);
+        filterInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                clearFilter();
+            }
+        });
+    }
+
+    if (clearButton) {
+        clearButton.addEventListener('click', clearFilter);
+    }
+}
+
+function handleFilterChange(e) {
+    igFilterText = e.target.value.toLowerCase().trim();
+    updateFilteredIgList();
+    updateIgList();
+
+    // Update clear button visibility
+    const clearButton = document.getElementById('clear-filter');
+    if (clearButton) {
+        clearButton.style.display = igFilterText ? 'flex' : 'none';
+    }
+}
+
+function clearFilter() {
+    const filterInput = document.getElementById('ig-filter');
+    const clearButton = document.getElementById('clear-filter');
+
+    if (filterInput) {
+        filterInput.value = '';
+    }
+    if (clearButton) {
+        clearButton.style.display = 'none';
+    }
+
+    igFilterText = '';
+    updateFilteredIgList();
+    updateIgList();
+}
+
+function updateFilteredIgList() {
+    if (!igFilterText) {
+        filteredIgList = [...igList];
+    } else {
+        filteredIgList = igList.filter(ig => {
+            const nameMatch = ig.name.toLowerCase().includes(igFilterText);
+            const folderMatch = ig.folder.toLowerCase().includes(igFilterText);
+            return nameMatch || folderMatch;
+        });
     }
 }
 
