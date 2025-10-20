@@ -1,3 +1,34 @@
+/*
+BSD 3-Clause License
+
+Copyright (c) 2025, Grahame Grieve
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 const ipcRenderer = require('electron').ipcRenderer;
 const fs = require('fs');
 const path = require('path');
@@ -1045,7 +1076,7 @@ async function getPackageId(folder) {
         }
 
         if (!igResourcePath) {
-            throw new Error('No ig= found in [IG] section');
+            return await getPackageIdFromPackageList(folder);
         }
 
         // Read the IG resource file
@@ -1093,6 +1124,55 @@ async function getPackageId(folder) {
 
     } catch (error) {
         throw new Error(`Failed to get package ID: ${error.message}`);
+    }
+}
+
+async function getPackageIdFromPackageList(folder) {
+    const packageListPath = path.join(folder, 'package-list.json');
+
+    if (!fs.existsSync(packageListPath)) {
+        throw new Error('package-list.json not found');
+    }
+
+    try {
+        const content = fs.readFileSync(packageListPath, 'utf8');
+        const packageList = JSON.parse(content);
+
+        const packageId = packageList['package-id'];
+
+        if (!packageId) {
+            throw new Error('No package-id found in package-list.json');
+        }
+
+        // Try to get version from the list array if it exists
+        let version = 'Unknown';
+        let title = packageId;
+
+        if (packageList.list && Array.isArray(packageList.list) && packageList.list.length > 0) {
+            // Get the first (most recent) version from the list
+            const latestEntry = packageList.list[0];
+            if (latestEntry.version) {
+                version = latestEntry.version;
+            }
+        }
+
+        // Try to get title
+        if (packageList.title) {
+            title = packageList.title;
+        }
+
+        const result = version && version !== 'Unknown' ? `${packageId}#${version}` : packageId;
+
+        return {
+            packageId: packageId,
+            version: version,
+            title: title,
+            fullPackageId: result,
+            source: 'package-list.json' // Indicate the source for debugging
+        };
+
+    } catch (error) {
+        throw new Error(`Failed to parse package-list.json: ${error.message}`);
     }
 }
 
@@ -5691,3 +5771,1083 @@ function updateFilteredIgList() {
 }
 
 ipcRenderer.on('menu-search', showSearchPanel);
+
+// Batch comparison state
+let batchComparisonState = {
+    isRunning: false,
+    queue: [],
+    results: [],
+    workers: [],
+    workerStates: [],  // NEW: separate array for worker states
+    scratchDir: null,
+    statusPanel: null,
+    logStream: null,   // NEW: for combined log file
+    startTime: null    // NEW: for timing
+};
+
+// Add to setupEventListeners() function:
+document.getElementById('btn-batch-comparison').addEventListener('click', showBatchComparisonDialog);
+
+// ============================================================================
+// DIALOG FUNCTIONS
+// ============================================================================
+
+function showBatchComparisonDialog() {
+    const settings = loadBatchComparisonSettings();
+
+    return new Promise(function(resolve) {
+        const dialog = document.createElement('div');
+        dialog.innerHTML = createBatchComparisonDialogHTML(settings);
+
+        window.resolveBatchDialog = function(action) {
+            if (action === 'execute') {
+                const evalVersion = document.getElementById('batch-eval-version').value;
+                const customJarPath = document.getElementById('batch-custom-jar-path').value.trim();
+
+                const newSettings = {
+                    githubUrls: document.getElementById('batch-github-urls').value.trim(),
+                    baseVersion: document.getElementById('batch-base-version').value,
+                    evalVersion: evalVersion,
+                    targetDirectory: document.getElementById('batch-target-dir').value.trim(),
+                    numWorkers: parseInt(document.getElementById('batch-num-workers').value),
+                    customJarPath: customJarPath  // Pass but don't save
+                };
+
+                // Validate inputs
+                if (!newSettings.githubUrls) {
+                    alert('Please enter at least one GitHub URL');
+                    return;
+                }
+                if (!newSettings.targetDirectory) {
+                    alert('Please select a target directory');
+                    return;
+                }
+                if (newSettings.numWorkers < 1 || newSettings.numWorkers > 10) {
+                    alert('Number of workers must be between 1 and 10');
+                    return;
+                }
+
+                // Validate custom JAR path if using custom version
+                if (evalVersion === 'custom') {
+                    if (!customJarPath) {
+                        alert('Please select a custom JAR file');
+                        return;
+                    }
+                    if (!fs.existsSync(customJarPath)) {
+                        alert('JAR file not found at: ' + customJarPath);
+                        return;
+                    }
+                    if (!customJarPath.endsWith('.jar')) {
+                        alert('Selected file must be a JAR file');
+                        return;
+                    }
+                }
+
+                // Save settings (but not customJarPath)
+                saveBatchComparisonSettings(newSettings);
+
+                // Close dialog BEFORE starting batch (so it runs in background)
+                document.body.removeChild(dialog);
+                delete window.resolveBatchDialog;
+
+                // Start batch comparison in background
+                startBatchComparison(newSettings);
+                resolve('execute');
+            } else {
+                document.body.removeChild(dialog);
+                delete window.resolveBatchDialog;
+                resolve('cancel');
+            }
+        };
+
+        document.body.appendChild(dialog);
+        setupBatchDialogListeners(dialog);
+    });
+}
+
+function createBatchComparisonDialogHTML(settings) {
+    // Get available versions from the dropdown
+    const versionSelect = document.getElementById('ig-publisher-version');
+    const versions = Array.from(versionSelect.options).map(opt => opt.value);
+
+    // Add 'Custom JAR' to evaluation versions
+    const evalVersions = ['custom', ...versions];
+
+    const baseVersionOptions = versions.map(v =>
+      `<option value="${v}" ${v === settings.baseVersion ? 'selected' : ''}>${v}</option>`
+    ).join('');
+
+    const evalVersionOptions = evalVersions.map(v =>
+      `<option value="${v}" ${v === settings.evalVersion ? 'selected' : ''}>${v === 'custom' ? 'Custom JAR...' : v}</option>`
+    ).join('');
+
+    // Show custom JAR path field if eval version is 'custom'
+    // Don't pre-populate - let user select fresh each time
+    const showCustomPath = settings.evalVersion === 'custom';
+    const customPathDisplay = showCustomPath ? 'block' : 'none';;
+    const customJarValue = settings.customJarPath || '';
+
+    return `
+        <div class="dialog-overlay">
+            <div class="dialog batch-comparison-dialog">
+                <div class="dialog-header">Batch IG Comparison</div>
+                <div class="dialog-content batch-comparison-content">
+                    
+                    <div class="form-section">
+                        <h3>Implementation Guides</h3>
+                        <div class="form-group">
+                            <label for="batch-github-urls">GitHub URLs (one per line):</label>
+                            <textarea id="batch-github-urls" rows="8" 
+                                      placeholder="Paste GitHub URLs here, one per line..."
+                                      spellcheck="false"
+                                      autocomplete="off"
+                                      autocorrect="off"
+                                      autocapitalize="off">${settings.githubUrls || ''}</textarea>
+                        </div>
+                        <div class="helper-text">
+                            Click in the text area above, then paste with Ctrl+V (Windows/Linux) or Cmd+V (Mac), or right-click and select Paste.
+                        </div>
+                    </div>
+                    
+                    <div class="form-section">
+                        <h3>Comparison Settings</h3>
+                        
+                        <div class="form-group-inline">
+                            <label for="batch-base-version">Base IG Publisher Version:</label>
+                            <select id="batch-base-version">
+                                ${baseVersionOptions}
+                            </select>
+                        </div>
+                        
+                        <div class="form-group-inline">
+                            <label for="batch-eval-version">Evaluation IG Publisher Version:</label>
+                            <select id="batch-eval-version">
+                                ${evalVersionOptions}
+                            </select>
+                        </div>
+                        
+                        <div class="form-group-inline" id="custom-jar-path-group" style="display: ${customPathDisplay};">
+                            <label for="batch-custom-jar-path">Custom JAR Path:</label>
+                            <div class="input-with-button">
+                                <input type="text" id="batch-custom-jar-path" value="${customJarValue}" 
+                                       placeholder="Browse to select your custom publisher JAR file">
+                                <button type="button" id="browse-custom-jar">Browse...</button>
+                            </div>
+                        </div>
+                        <div class="helper-text" id="custom-jar-helper" style="display: ${customPathDisplay};">
+                            Select your local IG Publisher JAR file (e.g., publisher-1.6.25-SNAPSHOT.jar from target/ folder).
+                        </div>
+                        
+                        <div class="form-group-inline">
+                            <label for="batch-target-dir">Target Directory:</label>
+                            <div class="input-with-button">
+                                <input type="text" id="batch-target-dir" value="${settings.targetDirectory || ''}" 
+                                       placeholder="Select target directory for results">
+                                <button type="button" id="browse-batch-target">Browse...</button>
+                            </div>
+                        </div>
+                        
+                        <div class="form-group-inline">
+                            <label for="batch-num-workers">Number of Workers:</label>
+                            <input type="number" id="batch-num-workers" value="${settings.numWorkers || 2}" 
+                                   min="1" max="10" step="1">
+                        </div>
+                        <div class="helper-text">
+                            Number of IGs to build simultaneously (1-10). More workers = faster but more resource intensive.
+                        </div>
+                    </div>
+                </div>
+                <div class="dialog-buttons">
+                    <button onclick="resolveBatchDialog('cancel')" class="btn-cancel">Cancel</button>
+                    <button onclick="resolveBatchDialog('execute')" class="btn-ok">Start Batch (runs in background)</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function setupBatchDialogListeners(dialog) {
+    // Browse target directory button
+    const browseBtn = dialog.querySelector('#browse-batch-target');
+    const targetInput = dialog.querySelector('#batch-target-dir');
+
+    if (browseBtn && targetInput) {
+        browseBtn.addEventListener('click', async function() {
+            try {
+                const result = await ipcRenderer.invoke('select-folder');
+                if (!result.canceled && result.filePaths.length > 0) {
+                    targetInput.value = result.filePaths[0];
+                }
+            } catch (error) {
+                console.log('Error selecting folder:', error);
+            }
+        });
+    }
+
+    // Browse custom JAR button - use file picker
+    const browseCustomJarBtn = dialog.querySelector('#browse-custom-jar');
+    const customJarInput = dialog.querySelector('#batch-custom-jar-path');
+
+    if (browseCustomJarBtn && customJarInput) {
+        browseCustomJarBtn.addEventListener('click', async function() {
+            try {
+                const result = await ipcRenderer.invoke('select-file', {
+                    filters: [
+                        { name: 'JAR Files', extensions: ['jar'] },
+                        { name: 'All Files', extensions: ['*'] }
+                    ],
+                    properties: ['openFile']
+                });
+
+                if (!result.canceled && result.filePaths.length > 0) {
+                    customJarInput.value = result.filePaths[0];
+                }
+            } catch (error) {
+                console.log('Error selecting JAR file:', error);
+                alert('Error selecting JAR file. Please type the path manually.');
+            }
+        });
+    }
+
+    // Show/hide custom JAR path based on eval version selection
+    const evalVersionSelect = dialog.querySelector('#batch-eval-version');
+    const customJarGroup = dialog.querySelector('#custom-jar-path-group');
+    const customJarHelper = dialog.querySelector('#custom-jar-helper');
+
+    if (evalVersionSelect && customJarGroup && customJarHelper) {
+        evalVersionSelect.addEventListener('change', function() {
+            const isCustom = this.value === 'custom';
+            customJarGroup.style.display = isCustom ? 'flex' : 'none';
+            customJarHelper.style.display = isCustom ? 'block' : 'none';
+        });
+    }
+
+    // Fix textarea paste functionality - CRITICAL FIX
+    const urlsTextarea = dialog.querySelector('#batch-github-urls');
+    if (urlsTextarea) {
+        // Remove any attributes that might block input
+        urlsTextarea.removeAttribute('readonly');
+        urlsTextarea.removeAttribute('disabled');
+
+        // Ensure it's fully interactive
+        urlsTextarea.style.pointerEvents = 'auto';
+        urlsTextarea.style.userSelect = 'text';
+        urlsTextarea.style.webkitUserSelect = 'text';
+        urlsTextarea.style.mozUserSelect = 'text';
+        urlsTextarea.style.msUserSelect = 'text';
+
+        // NUCLEAR OPTION: Use a manual paste handler
+        urlsTextarea.addEventListener('keydown', function(e) {
+            // Check for Ctrl+V or Cmd+V
+            if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+                console.log('Paste keyboard shortcut detected');
+                e.preventDefault();
+                e.stopPropagation();
+
+                // Read from clipboard and insert manually
+                navigator.clipboard.readText().then(function(text) {
+                    console.log('Clipboard text retrieved:', text.substring(0, 50));
+                    const textarea = e.target;
+                    const start = textarea.selectionStart;
+                    const end = textarea.selectionEnd;
+                    const currentValue = textarea.value;
+
+                    // Insert the text at cursor position
+                    textarea.value = currentValue.substring(0, start) + text + currentValue.substring(end);
+
+                    // Move cursor to end of pasted text
+                    const newCursorPos = start + text.length;
+                    textarea.selectionStart = newCursorPos;
+                    textarea.selectionEnd = newCursorPos;
+
+                    console.log('Text pasted successfully');
+                }).catch(function(err) {
+                    console.error('Failed to read clipboard:', err);
+                    alert('Failed to paste. Error: ' + err.message);
+                });
+            }
+        }, true);
+
+        // Also try to capture native paste event
+        urlsTextarea.addEventListener('paste', function(e) {
+            console.log('Native paste event detected');
+            e.stopPropagation();
+            // Let default behavior work
+        }, true);
+
+        // Stop other events from propagating
+        ['mousedown', 'mouseup', 'click', 'dblclick', 'keyup', 'keypress', 'cut', 'copy', 'contextmenu', 'input', 'change'].forEach(function(eventType) {
+            urlsTextarea.addEventListener(eventType, function(e) {
+                e.stopPropagation();
+            }, true);
+        });
+
+        // Focus on click
+        urlsTextarea.addEventListener('click', function(e) {
+            this.focus();
+        });
+
+        // Add visible feedback when focused
+        urlsTextarea.addEventListener('focus', function() {
+            this.style.borderColor = '#007acc';
+            this.style.outline = '2px solid #007acc';
+            console.log('Textarea focused - you can now paste with Ctrl+V or Cmd+V');
+        });
+
+        urlsTextarea.addEventListener('blur', function() {
+            this.style.borderColor = '#ccc';
+            this.style.outline = 'none';
+        });
+
+        console.log('Textarea paste handlers set up');
+    } else {
+        console.error('Could not find batch-github-urls textarea!');
+    }
+
+    // Prevent dialog overlay from blocking clicks on dialog content
+    const dialogOverlay = dialog.querySelector('.dialog-overlay');
+    const dialogContent = dialog.querySelector('.dialog');
+
+    if (dialogOverlay && dialogContent) {
+        dialogOverlay.addEventListener('mousedown', function(e) {
+            // Only close if clicking the overlay itself, not its children
+            if (e.target === dialogOverlay) {
+                window.resolveBatchDialog('cancel');
+            }
+        });
+
+        // Make sure dialog content doesn't block events
+        dialogContent.addEventListener('mousedown', function(e) {
+            e.stopPropagation();
+        });
+    }
+}
+
+// ============================================================================
+// SETTINGS FUNCTIONS
+// ============================================================================
+
+function loadBatchComparisonSettings() {
+    try {
+        const saved = localStorage.getItem('batchComparisonSettings');
+        return saved ? JSON.parse(saved) : {
+            githubUrls: '',
+            baseVersion: 'latest',
+            evalVersion: 'latest',
+            targetDirectory: '',
+            numWorkers: 2,
+            customJarPath: ''
+        };
+    } catch (error) {
+        console.log('Could not load batch comparison settings:', error);
+        return {
+            githubUrls: '',
+            baseVersion: 'latest',
+            evalVersion: 'latest',
+            targetDirectory: '',
+            numWorkers: 2,
+            customJarPath: ''
+        };
+    }
+}
+
+function saveBatchComparisonSettings(settings) {
+    try {
+        localStorage.setItem('batchComparisonSettings', JSON.stringify(settings));
+    } catch (error) {
+        console.log('Could not save batch comparison settings:', error);
+    }
+}
+
+// ============================================================================
+// BATCH COMPARISON EXECUTION
+// ============================================================================
+
+async function startBatchComparison(settings) {
+    if (batchComparisonState.isRunning) {
+        alert('Batch comparison already running');
+        return;
+    }
+
+    // Parse GitHub URLs
+    const urls = settings.githubUrls.split('\n')
+      .map(url => url.trim())
+      .filter(url => url && url.startsWith('http'));
+
+    if (urls.length === 0) {
+        alert('No valid GitHub URLs found');
+        return;
+    }
+
+    // Initialize batch state
+    batchComparisonState.isRunning = true;
+    batchComparisonState.startTime = Date.now();
+    batchComparisonState.queue = urls.map((url, index) => ({
+        url: url,
+        index: index,
+        status: 'queued',
+        packageId: null,
+        startTime: null,
+        endTime: null
+    }));
+    batchComparisonState.results = [];
+    batchComparisonState.workers = [];
+    batchComparisonState.workerStates = []; // NEW
+
+    // Show status panel
+    showBatchStatusPanel(settings, urls.length);
+
+    // Create scratch directory
+    try {
+        const os = require('os');
+        const tmpDir = os.tmpdir();
+        batchComparisonState.scratchDir = path.join(tmpDir, 'ig-batch-' + Date.now());
+
+        if (!fs.existsSync(batchComparisonState.scratchDir)) {
+            fs.mkdirSync(batchComparisonState.scratchDir, { recursive: true });
+        }
+    } catch (error) {
+        updateBatchStatus('Error', `Failed to create scratch directory: ${error.message}`, 0);
+        batchComparisonState.isRunning = false;
+        return;
+    }
+
+    // Create target directories and log file
+    try {
+        const baseDir = path.join(settings.targetDirectory, settings.baseVersion);
+        const evalDir = path.join(settings.targetDirectory, settings.evalVersion);
+
+        if (!fs.existsSync(baseDir)) {
+            fs.mkdirSync(baseDir, { recursive: true });
+        }
+        if (!fs.existsSync(evalDir)) {
+            fs.mkdirSync(evalDir, { recursive: true });
+        }
+
+        // NEW: Create combined log file
+        const logPath = path.join(settings.targetDirectory, 'batch-comparison.log');
+        batchComparisonState.logStream = fs.createWriteStream(logPath, { flags: 'w' });
+
+        logToBatch(`Batch Comparison Started`);
+        logToBatch(`Time: ${new Date().toISOString()}`);
+        logToBatch(`Base Version: ${settings.baseVersion}`);
+        logToBatch(`Eval Version: ${settings.evalVersion}`);
+        logToBatch(`Number of Workers: ${settings.numWorkers}`);
+        logToBatch(`Number of IGs: ${urls.length}`);
+        logToBatch(`Target Directory: ${settings.targetDirectory}`);
+        logToBatch(`Scratch Directory: ${batchComparisonState.scratchDir}`);
+        logToBatch(`\n${'='.repeat(80)}\n`);
+
+    } catch (error) {
+        updateBatchStatus('Error', `Failed to create target directories: ${error.message}`, 0);
+        batchComparisonState.isRunning = false;
+        return;
+    }
+
+    // Initialize worker states
+    for (let i = 0; i < settings.numWorkers; i++) {
+        batchComparisonState.workerStates.push({ currentIG: null, status: 'Starting' });
+    }
+    updateWorkerDisplay();
+
+    // Start workers
+    for (let i = 0; i < settings.numWorkers; i++) {
+        batchComparisonState.workers.push(
+          processBatchWorker(i, settings)
+        );
+    }
+
+    // Wait for all workers to complete
+    await Promise.all(batchComparisonState.workers);
+
+    // Generate summary
+    await generateBatchSummary(settings);
+
+    // Cleanup
+    try {
+        await cleanupScratchDirectory();
+        logToBatch('\nScratch directory cleaned up');
+    } catch (error) {
+        console.log('Warning: Failed to cleanup scratch directory:', error);
+        logToBatch(`\nWarning: Failed to cleanup scratch directory: ${error.message}`);
+    }
+
+    // Close log file
+    if (batchComparisonState.logStream) {
+        batchComparisonState.logStream.end();
+    }
+
+    // Summary
+    const successful = batchComparisonState.results.filter(r => r.success).length;
+    const failed = batchComparisonState.results.filter(r => !r.success).length;
+    const totalTime = Math.round((Date.now() - batchComparisonState.startTime) / 1000);
+
+    updateBatchStatus('Complete', `${successful} successful, ${failed} failed (${totalTime}s total)`, 100);
+
+    // Hide panel after 5 seconds
+    setTimeout(function() {
+        hideBatchStatusPanel();
+    }, 5000);
+
+    batchComparisonState.isRunning = false;
+}
+
+function logToBatch(message) {
+    const timestamp = new Date().toISOString();
+    const logMessage = `[${timestamp}] ${message}\n`;
+
+    if (batchComparisonState.logStream) {
+        batchComparisonState.logStream.write(logMessage);
+    }
+
+    console.log(message);
+}
+
+async function processBatchWorker(workerId, settings) {
+    batchComparisonState.workerStates[workerId] = { currentIG: null, status: 'Ready' };
+    updateWorkerDisplay();
+
+    logToBatch(`Worker ${workerId} started`);
+
+    while (true) {
+        // Check if cancelled
+        if (!batchComparisonState.isRunning) {
+            logToBatch(`Worker ${workerId} stopped (cancelled)`);
+            break;
+        }
+
+        // Get next item from queue
+        const item = batchComparisonState.queue.find(i => i.status === 'queued');
+        if (!item) {
+            batchComparisonState.workerStates[workerId] = { currentIG: null, status: 'Finished' };
+            updateWorkerDisplay();
+            logToBatch(`Worker ${workerId} finished (no more items)`);
+            break;
+        }
+
+        item.status = 'processing';
+        item.startTime = Date.now();
+
+        logToBatch(`Worker ${workerId} processing: ${item.url}`);
+
+        try {
+            const result = await processSingleIG(item.url, settings, workerId);
+            item.status = 'completed';
+            item.endTime = Date.now();
+            item.packageId = result.packageId;
+
+            const duration = Math.round((item.endTime - item.startTime) / 1000);
+            logToBatch(`Worker ${workerId} completed: ${result.packageId || item.url} (${duration}s) - Base: ${result.baseBuilt}, Eval: ${result.evalBuilt}`);
+
+            batchComparisonState.results.push(result);
+
+            // Update progress
+            updateBatchProgress();
+
+        } catch (error) {
+            item.status = 'failed';
+            item.endTime = Date.now();
+
+            const duration = Math.round((item.endTime - item.startTime) / 1000);
+            logToBatch(`Worker ${workerId} failed: ${item.url} (${duration}s) - ${error.message}`);
+
+            batchComparisonState.results.push({
+                url: item.url,
+                success: false,
+                error: error.message,
+                duration: duration
+            });
+
+            // Update progress
+            updateBatchProgress();
+        }
+    }
+
+    // Clear worker status
+    batchComparisonState.workerStates[workerId] = { currentIG: null, status: 'Idle' };
+    updateWorkerDisplay();
+}
+
+async function processSingleIG(githubUrl, settings, workerId) {
+    const result = {
+        url: githubUrl,
+        success: false,
+        packageId: null,
+        baseBuilt: false,
+        evalBuilt: false,
+        baseTime: 0,
+        evalTime: 0,
+        error: null
+    };
+
+    try {
+        // Parse GitHub URL
+        const parsed = parseGitUrl(githubUrl, false);
+        if (!parsed) {
+            throw new Error('Invalid GitHub URL');
+        }
+
+        // Clone repository
+        batchComparisonState.workerStates[workerId].currentIG = `Cloning ${parsed.repo}`;
+        batchComparisonState.workerStates[workerId].status = 'Cloning';
+        updateWorkerDisplay();
+
+        const cloneDir = path.join(batchComparisonState.scratchDir, `worker${workerId}-${Date.now()}`);
+        await cloneForBatchComparison(parsed, cloneDir);
+
+        // Get package ID
+        const packageInfo = await getPackageId(cloneDir);
+        result.packageId = packageInfo.packageId;
+
+        logToBatch(`  Package ID: ${result.packageId}`);
+
+        // Build with base version
+        batchComparisonState.workerStates[workerId].currentIG = `${result.packageId} (base)`;
+        batchComparisonState.workerStates[workerId].status = 'Building (base)';
+        updateWorkerDisplay();
+
+        const baseStart = Date.now();
+        const baseSuccess = await buildForBatchComparison(
+          cloneDir,
+          settings.baseVersion,
+          workerId,
+          settings.customJarPath,
+          settings.targetDirectory,
+          result.packageId
+        );
+        result.baseBuilt = baseSuccess;
+        result.baseTime = Math.round((Date.now() - baseStart) / 1000);
+
+        logToBatch(`  Base build (${settings.baseVersion}): ${baseSuccess ? 'SUCCESS' : 'FAILED'} (${result.baseTime}s)`);
+
+        if (baseSuccess) {
+            await copyBatchResults(cloneDir, settings.targetDirectory, settings.baseVersion, result.packageId);
+        }
+
+        batchComparisonState.workerStates[workerId].currentIG = `${result.packageId} (resetting)`;
+        batchComparisonState.workerStates[workerId].status = 'Resetting';
+        updateWorkerDisplay();
+
+        logToBatch(`  Resetting repository to clean state...`);
+        await resetGitRepository(cloneDir);
+        logToBatch(`  Repository reset complete`);
+
+
+        // Build with evaluation version
+        batchComparisonState.workerStates[workerId].currentIG = `${result.packageId} (eval)`;
+        batchComparisonState.workerStates[workerId].status = 'Building (eval)';
+        updateWorkerDisplay();
+
+        const evalStart = Date.now();
+        const evalSuccess = await buildForBatchComparison(
+          cloneDir,
+          settings.evalVersion,
+          workerId,
+          settings.customJarPath,
+          settings.targetDirectory,
+          result.packageId
+        );
+        result.evalBuilt = evalSuccess;
+        result.evalTime = Math.round((Date.now() - evalStart) / 1000);
+
+        logToBatch(`  Eval build (${settings.evalVersion}): ${evalSuccess ? 'SUCCESS' : 'FAILED'} (${result.evalTime}s)`);
+
+        if (evalSuccess) {
+            await copyBatchResults(cloneDir, settings.targetDirectory, settings.evalVersion, result.packageId);
+        }
+
+        // Cleanup clone directory
+        try {
+            await ipcRenderer.invoke('delete-folder', cloneDir);
+        } catch (error) {
+            console.log('Failed to delete clone directory:', error);
+        }
+
+        result.success = baseSuccess && evalSuccess;
+
+    } catch (error) {
+        result.error = error.message;
+        logToBatch(`  ERROR: ${error.message}`);
+    }
+
+    // Clear worker status
+    batchComparisonState.workerStates[workerId].currentIG = null;
+    batchComparisonState.workerStates[workerId].status = 'Ready';
+    updateWorkerDisplay();
+
+    return result;
+}
+
+function resetGitRepository(folder) {
+    return new Promise(function(resolve, reject) {
+        const spawn = require('child_process').spawn;
+
+        // Use git clean -fdx to remove all untracked files and directories
+        // Use git reset --hard to reset tracked files
+        const git = spawn('git', ['clean', '-fdx'], {
+            cwd: folder,
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        git.on('close', function(code) {
+            if (code !== 0) {
+                reject(new Error(`Git clean failed with exit code ${code}`));
+                return;
+            }
+
+            // Now reset tracked files
+            const gitReset = spawn('git', ['reset', '--hard', 'HEAD'], {
+                cwd: folder,
+                stdio: ['pipe', 'pipe', 'pipe']
+            });
+
+            gitReset.on('close', function(resetCode) {
+                if (resetCode === 0) {
+                    resolve();
+                } else {
+                    reject(new Error(`Git reset failed with exit code ${resetCode}`));
+                }
+            });
+
+            gitReset.on('error', function(error) {
+                reject(error);
+            });
+        });
+
+        git.on('error', function(error) {
+            reject(error);
+        });
+    });
+}
+
+async function cloneForBatchComparison(parsed, targetDir) {
+    const gitUrl = `${parsed.baseUrl || 'https://github.com'}/${parsed.org}/${parsed.repo}.git`;
+
+    return new Promise(function(resolve, reject) {
+        const spawn = require('child_process').spawn;
+        const args = ['clone', '--depth', '1', gitUrl, targetDir];
+
+        const git = spawn('git', args, {
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        git.on('close', function(code) {
+            if (code === 0) {
+                resolve();
+            } else {
+                reject(new Error(`Git clone failed with exit code ${code}`));
+            }
+        });
+
+        git.on('error', function(error) {
+            reject(error);
+        });
+    });
+}
+
+async function buildForBatchComparison(igFolder, version, workerId, customJarPath, targetDirectory, packageId) {
+    try {
+        let jarPath = null;
+
+        if (version === 'custom') {
+            // Use the specified custom JAR path
+            if (!customJarPath || !fs.existsSync(customJarPath)) {
+                throw new Error('Custom JAR path not specified or file not found');
+            }
+            jarPath = customJarPath;
+        } else {
+            // Get JAR path for released version
+            let downloadUrl = null;
+            let actualVersion = version;
+
+            if (version === 'latest') {
+                const savedVersions = loadSavedPublisherVersions();
+                if (savedVersions && savedVersions.length > 0) {
+                    actualVersion = savedVersions[0].version;
+                    downloadUrl = savedVersions[0].url;
+                } else {
+                    throw new Error('No publisher versions available');
+                }
+            } else {
+                const savedVersions = loadSavedPublisherVersions();
+                if (savedVersions) {
+                    const versionInfo = savedVersions.find(v => v.version === version);
+                    if (versionInfo) {
+                        downloadUrl = versionInfo.url;
+                    }
+                }
+                if (!downloadUrl) {
+                    throw new Error(`Download URL not found for version ${version}`);
+                }
+            }
+
+            jarPath = await getJarPath(actualVersion);
+
+            // Check if JAR exists, download if needed
+            if (!fs.existsSync(jarPath)) {
+                // For batch comparison, we'll use a simplified download
+                const response = await fetch(downloadUrl);
+                if (!response.ok) {
+                    throw new Error(`Failed to download JAR: ${response.status}`);
+                }
+                const buffer = Buffer.from(await response.arrayBuffer());
+                fs.writeFileSync(jarPath, buffer);
+            }
+        }
+
+        // Build command
+        const command = ['java', '-Xmx8G', '-jar', jarPath, '-ig', igFolder];
+
+        // Create log file path
+        const versionDir = path.join(targetDirectory, version);
+        const logPath = path.join(versionDir, `${packageId}.log`);
+
+        // Run build with log file
+        return await runBatchBuild(command, igFolder, logPath);
+
+    } catch (error) {
+        console.log(`Build error (worker ${workerId}):`, error);
+        return false;
+    }
+}
+
+function runBatchBuild(command, cwd, logPath) {
+    return new Promise(function(resolve) {
+        const spawn = require('child_process').spawn;
+
+        const process = spawn(command[0], command.slice(1), {
+            cwd: cwd,
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        // Create write stream for log file
+        const logStream = fs.createWriteStream(logPath, { flags: 'w' });
+
+        // Pipe stdout and stderr directly to log file
+        process.stdout.pipe(logStream);
+        process.stderr.pipe(logStream);
+
+        process.on('close', function(code) {
+            logStream.end();
+
+            if (code === 0) {
+                resolve(true);
+            } else {
+                resolve(false);
+            }
+        });
+
+        process.on('error', function(error) {
+            console.log('Process error:', error);
+            logStream.write(`\nProcess error: ${error.message}\n`);
+            logStream.end();
+            resolve(false);
+        });
+    });
+}
+
+async function copyBatchResults(igFolder, targetDir, version, packageId) {
+    const versionDir = path.join(targetDir, version);
+
+    // Copy qa.txt as-is
+    const qaTxtSrc = path.join(igFolder, 'output', 'qa.txt');
+    const qaTxtDest = path.join(versionDir, `${packageId}.txt`);
+
+    if (fs.existsSync(qaTxtSrc)) {
+        fs.copyFileSync(qaTxtSrc, qaTxtDest);
+    }
+
+    // Copy qa.json with modifications
+    const qaJsonSrc = path.join(igFolder, 'output', 'qa.json');
+    const qaJsonDest = path.join(versionDir, `${packageId}.json`);
+
+    if (fs.existsSync(qaJsonSrc)) {
+        const content = fs.readFileSync(qaJsonSrc, 'utf8');
+        const qaData = JSON.parse(content);
+
+        // Remove specified fields
+        delete qaData.date;
+        delete qaData.dateISO8601;
+        delete qaData.maxMemory;
+
+        fs.writeFileSync(qaJsonDest, JSON.stringify(qaData, null, 2));
+    }
+}
+
+async function cleanupScratchDirectory() {
+    if (batchComparisonState.scratchDir && fs.existsSync(batchComparisonState.scratchDir)) {
+        await ipcRenderer.invoke('delete-folder', batchComparisonState.scratchDir);
+    }
+}
+
+// ============================================================================
+// STATUS PANEL FUNCTIONS
+// ============================================================================
+
+function showBatchStatusPanel(settings, totalCount) {
+    // Remove existing panel if any
+    hideBatchStatusPanel();
+
+    const panel = document.createElement('div');
+    panel.id = 'batch-status-panel';
+    panel.className = 'batch-status-panel';
+    panel.innerHTML = `
+        <div class="batch-status-header">
+            <div class="batch-status-title">
+                <strong>Batch Comparison:</strong> 
+                <span id="batch-status-text">Starting...</span>
+            </div>
+            <div class="batch-status-progress">
+                <span id="batch-progress-text">0%</span>
+                <div class="batch-progress-bar">
+                    <div id="batch-progress-fill" class="batch-progress-fill"></div>
+                </div>
+            </div>
+            <button id="batch-cancel-btn" class="batch-cancel-btn">Cancel</button>
+        </div>
+        <div class="batch-status-workers" id="batch-status-workers">
+            <!-- Worker status will be inserted here -->
+        </div>
+    `;
+
+    document.body.appendChild(panel);
+    batchComparisonState.statusPanel = panel;
+
+    // Setup cancel button
+    document.getElementById('batch-cancel-btn').addEventListener('click', cancelBatchComparison);
+
+    // Show initial worker slots
+    updateWorkerDisplay();
+}
+
+function hideBatchStatusPanel() {
+    if (batchComparisonState.statusPanel) {
+        document.body.removeChild(batchComparisonState.statusPanel);
+        batchComparisonState.statusPanel = null;
+    }
+}
+
+function updateBatchStatus(status, text, progress) {
+    if (!batchComparisonState.statusPanel) return;
+
+    const statusText = document.getElementById('batch-status-text');
+    const progressText = document.getElementById('batch-progress-text');
+    const progressFill = document.getElementById('batch-progress-fill');
+
+    if (statusText) statusText.textContent = text;
+    if (progressText) progressText.textContent = `${Math.round(progress)}%`;
+    if (progressFill) progressFill.style.width = `${progress}%`;
+}
+
+function updateBatchProgress() {
+    const completed = batchComparisonState.results.length;
+    const total = batchComparisonState.queue.length;
+    const progress = (completed / total) * 100;
+
+    updateBatchStatus('Running', `${completed} of ${total} IGs processed`, progress);
+}
+
+function updateWorkerDisplay() {
+    if (!batchComparisonState.statusPanel) return;
+
+    const workersDiv = document.getElementById('batch-status-workers');
+    if (!workersDiv) return;
+
+    const workersHTML = batchComparisonState.workerStates.map((worker, index) => {
+        const status = worker.currentIG
+          ? `${worker.status}: ${worker.currentIG}`
+          : worker.status || 'Idle';
+        return `<div class="batch-worker-status">Worker ${index + 1}: ${status}</div>`;
+    }).join('');
+
+    workersDiv.innerHTML = workersHTML;
+}
+
+
+function cancelBatchComparison() {
+    if (!batchComparisonState.isRunning) return;
+
+    if (confirm('Cancel batch comparison? This will stop all running builds.')) {
+        batchComparisonState.isRunning = false;
+        updateBatchStatus('Cancelled', 'Batch comparison cancelled by user', 0);
+
+        // Hide panel after 3 seconds
+        setTimeout(function() {
+            hideBatchStatusPanel();
+        }, 3000);
+    }
+}
+
+async function generateBatchSummary(settings) {
+    const summaryPath = path.join(settings.targetDirectory, 'batch-summary.md');
+
+    let summary = `# Batch Comparison Summary\n\n`;
+    summary += `**Date:** ${new Date().toISOString()}\n\n`;
+    summary += `**Base Version:** ${settings.baseVersion}\n\n`;
+    summary += `**Evaluation Version:** ${settings.evalVersion}\n\n`;
+    summary += `**Number of Workers:** ${settings.numWorkers}\n\n`;
+
+    const totalTime = Math.round((Date.now() - batchComparisonState.startTime) / 1000);
+    const minutes = Math.floor(totalTime / 60);
+    const seconds = totalTime % 60;
+    summary += `**Total Duration:** ${minutes}m ${seconds}s\n\n`;
+
+    summary += `---\n\n`;
+
+    // Statistics
+    const successful = batchComparisonState.results.filter(r => r.success).length;
+    const failed = batchComparisonState.results.filter(r => !r.success).length;
+    const total = batchComparisonState.results.length;
+
+    summary += `## Statistics\n\n`;
+    summary += `- **Total IGs:** ${total}\n`;
+    summary += `- **Successful:** ${successful} (${Math.round(successful/total*100)}%)\n`;
+    summary += `- **Failed:** ${failed} (${Math.round(failed/total*100)}%)\n\n`;
+
+    // Results table
+    summary += `## Results\n\n`;
+    summary += `| # | Package ID | Status | Base Build | Eval Build | Base Time | Eval Time | Time Diff | Total Time |\n`;
+    summary += `|---|------------|--------|------------|------------|-----------|-----------|-----------|------------|\n`;
+
+    batchComparisonState.results.forEach((result, index) => {
+        const packageId = result.packageId || 'Unknown';
+        const status = result.success ? '\u2705' : '\u274C';
+        const baseStatus = result.baseBuilt ? '\u2705' : '\u274C';
+        const evalStatus = result.evalBuilt ? '\u2705' : '\u274C';
+        const baseTime = result.baseTime ? `${result.baseTime}s` : '-';
+        const evalTime = result.evalTime ? `${result.evalTime}s` : '-';
+        let timeDiff = '-';
+        if (result.baseTime && result.evalTime) {
+            const diff = result.evalTime - result.baseTime;
+            const percentChange = ((diff / result.baseTime) * 100).toFixed(1);
+            const sign = diff > 0 ? '+' : '';
+            timeDiff = `${sign}${diff}s (${sign}${percentChange}%)`;
+        }
+        const totalTime = result.baseTime && result.evalTime ? `${result.baseTime + result.evalTime}s` : '-';
+
+        summary += `| ${index + 1} | ${packageId} | ${status} | ${baseStatus} | ${evalStatus} | ${baseTime} | ${evalTime} | ${timeDiff} | ${totalTime} |\n`;
+    });
+
+    // Failed builds section
+    const failedResults = batchComparisonState.results.filter(r => !r.success);
+    if (failedResults.length > 0) {
+        summary += `\n## Failed Builds\n\n`;
+        failedResults.forEach((result, index) => {
+            summary += `### ${index + 1}. ${result.packageId || result.url}\n\n`;
+            if (result.error) {
+                summary += `**Error:** ${result.error}\n\n`;
+            }
+            if (!result.baseBuilt) {
+                summary += `- Base build failed\n`;
+            }
+            if (!result.evalBuilt) {
+                summary += `- Evaluation build failed\n`;
+            }
+            summary += `\n`;
+        });
+    }
+
+    // Write summary file
+    fs.writeFileSync(summaryPath, summary, 'utf8');
+    logToBatch(`\nSummary written to: ${summaryPath}`);
+}
