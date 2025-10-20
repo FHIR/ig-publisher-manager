@@ -40,7 +40,6 @@ function createWindow() {
   console.log('Icon path:', iconPath);
   console.log('Icon exists:', require('fs').existsSync(iconPath));
 
-
   const mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -52,7 +51,7 @@ function createWindow() {
       enableRemoteModule: true
     },
     icon: path.join(__dirname, 'assets/icon.png'), // Add your icon here
-    title: 'IG Publisher Manager'
+    title: `IG Publisher Manager (v${app.getVersion()})`
   });
 
   mainWindow.loadFile('index.html');
