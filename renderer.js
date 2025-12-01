@@ -149,7 +149,7 @@ async function ensureJarExists(version, downloadUrl, ig) {
         return jarPath;
     }
 
-    appendToIgConsole(ig, 'Downloading IG Publisher version ' + version + '...');
+    appendToIgConsole(ig, 'Downloading IG Publisher version ' + version + ' to '+jarPath+' ...');
 
     try {
         // Try multiple download methods for Windows compatibility
@@ -368,7 +368,7 @@ async function ensureJarExists(version, downloadUrl, ig) {
         return jarPath;
     }
     
-    appendToIgConsole(ig, 'Downloading IG Publisher version ' + version + '...');
+    appendToIgConsole(ig, 'Downloading IG Publisher version ' + version  + ' to '+jarPath + '...');
     appendToIgConsole(ig, 'Download URL: ' + downloadUrl);
     
     try {
@@ -600,7 +600,7 @@ async function ensureJarExists(version, downloadUrl, ig) {
         return jarPath;
     }
     
-    appendToIgConsole(ig, 'Downloading IG Publisher version ' + version + '...');
+    appendToIgConsole(ig, 'Downloading IG Publisher version ' + version + ' to '+jarPath + '...');
     
     try {
         const response = await fetch(downloadUrl);
@@ -1474,15 +1474,121 @@ function stripAnsiCodes(text) {
     return text.replace(ansiRegex, '');
 }
 
+async function getAugmentedEnvironment() {
+    const os = require('os');
+    const homeDir = os.homedir();
+    const settingsPath = path.join(homeDir, '.fhir', 'fhir-settings.json');
+
+    // Start with current environment
+    const env = Object.assign({}, process.env);
+
+    // Additional paths to add
+    const additionalPaths = [];
+
+    try {
+        if (fs.existsSync(settingsPath)) {
+            const settingsContent = fs.readFileSync(settingsPath, 'utf8');
+            const settings = JSON.parse(settingsContent);
+
+            // Extract directory paths from npmPath setting
+            // npmPath format: "/path/to/npm:/path/to/npx" - we want the bin directories
+            if (settings.npmPath) {
+                const npmPaths = settings.npmPath.split(':');
+                for (const p of npmPaths) {
+                    if (p) {
+                        // Get the directory containing npm/npx (the bin directory)
+                        const binDir = path.dirname(p);
+                        if (binDir && binDir !== '.' && !additionalPaths.includes(binDir)) {
+                            additionalPaths.push(binDir);
+                        }
+                    }
+                }
+            }
+
+            // Extract paths from rubyPath setting (already directory paths)
+            if (settings.rubyPath) {
+                const rubyPaths = settings.rubyPath.split(':');
+                for (const p of rubyPaths) {
+                    if (p && !additionalPaths.includes(p)) {
+                        additionalPaths.push(p);
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.log('Could not read fhir-settings.json for PATH augmentation:', error);
+    }
+
+    // Also discover nvm-installed node versions on macOS/Linux
+    const nvmDir = path.join(homeDir, '.nvm', 'versions', 'node');
+    if (fs.existsSync(nvmDir)) {
+        try {
+            const versions = fs.readdirSync(nvmDir);
+            for (const v of versions) {
+                const binPath = path.join(nvmDir, v, 'bin');
+                if (fs.existsSync(binPath) && !additionalPaths.includes(binPath)) {
+                    additionalPaths.push(binPath);
+                }
+            }
+        } catch (e) {
+            // Ignore errors reading nvm directory
+        }
+    }
+
+    // Add common paths based on platform
+    if (process.platform === 'darwin') {
+        // macOS homebrew paths
+        const homebrewPaths = [
+            '/opt/homebrew/bin',
+            '/opt/homebrew/sbin',
+            '/usr/local/bin',
+            '/usr/local/sbin'
+        ];
+        for (const p of homebrewPaths) {
+            if (fs.existsSync(p) && !additionalPaths.includes(p)) {
+                additionalPaths.push(p);
+            }
+        }
+    } else if (process.platform === 'win32') {
+        // Windows: Check for common Node.js installation paths
+        const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+        const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+        const appData = process.env.APPDATA || '';
+
+        const windowsPaths = [
+            path.join(programFiles, 'nodejs'),
+            path.join(programFilesX86, 'nodejs'),
+            path.join(appData, 'npm')
+        ];
+        for (const p of windowsPaths) {
+            if (fs.existsSync(p) && !additionalPaths.includes(p)) {
+                additionalPaths.push(p);
+            }
+        }
+    }
+
+    // Prepend additional paths to existing PATH
+    if (additionalPaths.length > 0) {
+        const currentPath = env.PATH || env.Path || '';
+        const separator = process.platform === 'win32' ? ';' : ':';
+        env.PATH = additionalPaths.join(separator) + separator + currentPath;
+    }
+
+    return env;
+}
+
+
 function runIgPublisherProcess(ig, command) {
-    return new Promise(function(resolve, reject) {
+    return new Promise(async function(resolve, reject) {
         const spawn = require('child_process').spawn;
 
         appendToIgConsole(ig, 'Starting IG Publisher process...');
+        const env = await getAugmentedEnvironment();
 
         const javaProcess = spawn(command[0], command.slice(1), {
             cwd: ig.folder,
-            stdio: ['pipe', 'pipe', 'pipe']
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: env
         });
 
         let hasOutput = false;
